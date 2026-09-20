@@ -1558,35 +1558,57 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ "$BRANCH_PREFIX_SET" -eq 0 ] || shared_args+=(--branch-prefix "$BRANCH_PREFIX")
   [ "$BASE_BRANCH_SET" -eq 0 ] || shared_args+=(--base-branch "$BASE_BRANCH")
   [ "$HERDR_RESUME_LOCK_WAIT" -eq 0 ] || shared_args+=(--herdr-resume-lock-wait)
+  preflight_rc=0
   for pair in "${POS[@]}"; do
     case "$pair" in
-    *=*) : ;;
+    *=*)
+      pair_id=${pair%%=*}
+      pair_proj=${pair#*=}
+      ;;
     *)
       echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2
-      rc=2
+      preflight_rc=2
       continue
       ;;
     esac
     if [ "$KIND" = secondmate ]; then
       echo "error: batch dispatch does not support --secondmate; spawn each secondmate explicitly" >&2
-      rc=2
+      preflight_rc=2
       continue
     fi
-    pair_args=("${pair%%=*}" "${pair#*=}" "${shared_args[@]+"${shared_args[@]}"}")
+    [ -n "$pair_id" ] || {
+      echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+      preflight_rc=2
+    }
+    if [ -n "$pair_id" ] && ! fm_task_id_creation_valid "$pair_id"; then
+      echo "error: invalid task id '$pair_id'" >&2
+      preflight_rc=2
+    fi
+    [ -n "$pair_proj" ] || {
+      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+      preflight_rc=2
+    }
+  done
+  [ "$preflight_rc" -eq 0 ] || exit "$preflight_rc"
+
+  for pair in "${POS[@]}"; do
+    pair_id=${pair%%=*}
+    pair_proj=${pair#*=}
+    pair_args=("$pair_id" "$pair_proj" "${shared_args[@]+"${shared_args[@]}"}")
     [ "$KIND" != scout ] || pair_args+=(--scout)
     pair_rc=0
     FM_SPAWN_NO_GUARD=1 "$FM_ROOT/bin/fm-spawn.sh" "${pair_args[@]}" || pair_rc=$?
     if [ "$pair_rc" -eq "$FM_PROJECT_CAPACITY_DEFER_EXIT" ]; then
-      echo "batch: DEFERRED ${pair%%=*} (${pair#*=}) - its project is at capacity, so it stays queued" >&2
+      echo "batch: DEFERRED $pair_id ($pair_proj) - its project is at capacity, so it stays queued" >&2
       [ "$rc" -ne 0 ] || rc=$FM_PROJECT_CAPACITY_DEFER_EXIT
     elif [ "$pair_rc" -ne 0 ]; then
-      echo "batch: FAILED to spawn ${pair%%=*} (${pair#*=})" >&2
+      echo "batch: FAILED to spawn $pair_id ($pair_proj)" >&2
       rc=1
     fi
   done
   exit "$rc"
 fi
-[ "${#POS[@]}" -gt 0 ] || {
+[ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
   echo "error: spawn requires a task id positional argument (<task-id>)" >&2
   exit 1
 }
@@ -1945,7 +1967,7 @@ elif [ "$KIND" = secondmate ]; then
     ;;
   esac
 else
-  [ "${#POS[@]}" -gt 1 ] || {
+  [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
     echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
     exit 1
   }
