@@ -1585,6 +1585,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+[ "${#POS[@]}" -gt 0 ] || {
+  echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+  exit 1
+}
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
@@ -1940,6 +1944,10 @@ elif [ "$KIND" = secondmate ]; then
     ;;
   esac
 else
+  [ "${#POS[@]}" -gt 1 ] || {
+    echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+    exit 1
+  }
   PROJ=${POS[1]}
   ARG3=${POS[2]:-}
 fi
