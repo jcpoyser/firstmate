@@ -39,6 +39,7 @@ set -u
 
 SEND="$ROOT/bin/fm-send.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
+CAPTAIN_HOLD="$ROOT/bin/fm-captain-hold.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-send-resolve-key)
 
@@ -113,8 +114,148 @@ setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
   printf '%s\n' "$home"
 }
 
+setup_captain_answer() {  # <home> <task-id> <answer>
+  local home=$1 id=$2 answer=$3 backlog="$1/data/backlog.md" decision="$1/data/decision.txt"
+  mkdir -p "$home/data" "$home/config"
+  cat > "$home/.tasks.toml" <<'EOF'
+backend = "markdown"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  cat > "$backlog" <<'EOF'
+# Backlog
+
+## In flight
+
+## Queued
+
+## Done
+EOF
+  FM_TASKS_AXI_COMPATIBLE=1 tasks-axi add "$id" "Captain decision for $id" --kind captain --file "$backlog" >/dev/null
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CAPTAIN_HOLD" hold "$id" \
+    --reason "captain decision required" >/dev/null
+  printf '%s\n' "$answer" > "$decision"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CAPTAIN_HOLD" answer "$id" \
+    --decision-file "$decision" >/dev/null
+}
+
 drain_out() {  # <home>
   FM_STATE_OVERRIDE="$1/state" "$DRAIN" 2>/dev/null
+}
+
+test_captain_decision_flag_absent_preserves_send_behavior() {
+  local dir fb log home rc body
+  dir="$TMP_ROOT/captain-absent"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home captain-absent)
+  fm_write_meta "$home/state/tc0.meta" "window=sess:fm-tc0" "kind=ship"
+
+  run_send "$fb" "$home" "$log" tc0 --captain-answer api-shape 'ordinary steer'; rc=$?
+  expect_code 0 "$rc" "without the policy flag the option-looking text should remain an ordinary steer"
+  body=$(bash -c '. "$1"; fm_task_inbox_body "$2"' _ "$ROOT/bin/fm-task-inbox-lib.sh" \
+    "$home/state/tc0.inbox/001.msg")
+  [ "$body" = '--captain-answer api-shape ordinary steer' ] \
+    || fail "the absent flag changed the original steer bytes: $body"
+  pass "fm-send preserves option-looking steer bytes when captain-decides-findings is absent"
+}
+
+test_captain_decision_flag_requires_recorded_answer() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; captain-answer enforcement requires its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/captain-required"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home captain-required)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tc1.meta" "window=sess:fm-tc1" "kind=ship"
+  printf 'needs-decision [key=api-shape]: choose an API\n' > "$home/state/tc1.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tc1 --resolve-key api-shape --captain-answer api-shape "Use API A." >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a decision send without a recorded captain answer succeeded"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer" "the refusal should identify the missing captain answer"
+  assert_contains "$(cat "$err")" "fm-captain-hold.sh answer <task-id> --decision-file <path>" \
+    "the refusal should explain how to record the captain's answer"
+  assert_contains "$(cat "$err")" "--captain-answer <task-id>" "the refusal should explain how to name the answer record"
+  [ ! -s "$log" ] || fail "a refused decision answer was typed: $(cat "$log")"
+  [ ! -e "$home/state/tc1.inbox/001.msg" ] || fail "a refused decision answer reached the worker"
+  grep -qF 'needs-decision [key=api-shape]' "$home/state/tc1.status" \
+    || fail "the refused decision was unexpectedly closed"
+  pass "fm-send with captain-decides-findings refuses before delivery without a recorded captain answer"
+}
+
+test_captain_decision_flag_accepts_recorded_answer() {
+  local dir fb log home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; captain-answer enforcement requires its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/captain-accepted"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"
+  home=$(setup_home captain-accepted)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tc2.meta" "window=sess:fm-tc2" "kind=ship"
+  printf 'needs-decision [key=api-shape]: choose an API\n' > "$home/state/tc2.status"
+  setup_captain_answer "$home" api-shape 'Use API A.'
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CAPTAIN_HOLD" answer-recorded api-shape >/dev/null \
+    || fail "the durable captain-hold answer was not recognized"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tc2 --resolve-key api-shape --captain-answer api-shape 'Use API A.' >/dev/null 2>&1; rc=$?
+  expect_code 0 "$rc" "a decision send naming its recorded captain answer should succeed"
+  grep -qF 'Use API A.' "$home/state/tc2.inbox/001.msg" \
+    || fail "the captain answer did not reach the worker"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/tc2.status" \
+    | grep -qF 'resolved [key=api-shape]: answered: Use API A.' \
+    || fail "the sent answer did not close its matching decision"
+  pass "fm-send accepts a named captain answer recorded by fm-captain-hold answer"
+}
+
+test_remote_captain_decision_guard_runs_before_transport() {
+  local dir fb log ssh_log err home rc
+  dir="$TMP_ROOT/remote-captain-required"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; ssh_log="$dir/ssh.log"; err="$dir/send.err"
+  home=$(setup_home remote-captain-required)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/rmate.meta" "window=fm-remote:p1" "endpoint_task_id=rmate" \
+    "remote_host=remote-host" "kind=secondmate"
+  printf 'needs-decision [key=design]: choose a design\n' > "$home/state/rmate.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" rmate --resolve-key design --captain-answer design "choose A" >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a remote decision send without a recorded captain answer succeeded"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer" \
+    "the remote refusal should identify the missing captain answer"
+  [ ! -s "$ssh_log" ] || fail "a refused remote answer crossed the transport: $(cat "$ssh_log")"
+  [ ! -e "$home/state/rmate.inbox/001.msg" ] || fail "a refused remote answer reached its target"
+  pass "fm-send applies captain-answer enforcement before remote delivery"
+}
+
+test_no_mistakes_response_cannot_bypass_open_decision() {
+  local dir fb log err home rc
+  dir="$TMP_ROOT/gate-bypass"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home gate-bypass)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tg1.meta" "window=sess:fm-tg1" "kind=ship"
+  printf 'needs-decision [key=nm-run-review]: review decision\n' > "$home/state/tg1.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" tg1 'no-mistakes axi respond --action approve' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a no-mistakes response command bypassed an open needs-decision key"
+  assert_contains "$(cat "$err")" "open needs-decision key 'nm-run-review' without --resolve-key" \
+    "the bypass refusal should identify the open decision and required key flag"
+  [ ! -s "$log" ] || fail "a refused no-mistakes response command was typed"
+  [ ! -e "$home/state/tg1.inbox/001.msg" ] || fail "a refused no-mistakes response command reached the worker"
+  pass "fm-send blocks a literal no-mistakes response command that omits an open decision key"
 }
 
 test_answer_send_closes_open_decision() {
@@ -905,6 +1046,11 @@ test_decision_answer_partition_relocates_under_the_record() {
   pass "fm-send --resolve-key: a decision answer refuses the attended branch before sending, a blocked: key stays steering, and the away-posture record relocates the answer"
 }
 
+test_captain_decision_flag_absent_preserves_send_behavior
+test_captain_decision_flag_requires_recorded_answer
+test_captain_decision_flag_accepts_recorded_answer
+test_remote_captain_decision_guard_runs_before_transport
+test_no_mistakes_response_cannot_bypass_open_decision
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
