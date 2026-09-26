@@ -163,7 +163,9 @@
 # It succeeds only when the task body carries a current `answer`, `answer
 # --release`, or repaired answer record from this lifecycle, with no active hold
 # stamp left in front of it. An old answer beneath a re-held task's new stamp is
-# not evidence for the current call.
+# not evidence for the current call. This record is attested by firstmate, not
+# proof that the captain authored it; the existing record store retains who
+# wrote it and when.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -193,8 +195,8 @@
 # one captain call. See "record divergence" beside command_diverged below.
 #
 # Resolution records: the block written into the body names this script, the
-# decision digest, and a `Resolution mode:` of answered, released, repaired, or
-# reconciled. Records written by the retired fm-decision-hold.sh (routed,
+# decision digest, and a `Resolution mode:` of answered, released, repaired,
+# routed, or reconciled. Records written by the retired fm-decision-hold.sh (routed,
 # declined, answered, repaired) are recognized everywhere a record is read, so
 # nothing already closed needs rewriting.
 #
@@ -1872,7 +1874,7 @@ command_answer_recorded() {  # <task-id>
   body_has_resolution_record "$body" || return 1
   mode=$(recorded_resolution_mode "$body" || true)
   case "$mode" in
-    answered|released|repaired) printf 'recorded: %s\n' "$id" ;;
+    answered|released|repaired|routed) printf 'recorded: %s\n' "$id" ;;
     *) return 1 ;;
   esac
 }

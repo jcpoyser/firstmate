@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Steer a task by durable record: write the message into the task's steering
 # inbox and ring a constant doorbell line into its terminal, best-effort.
-# Usage: fm-send.sh <target> [--resolve-key <key>]... [--captain-answer <task-id>]... [--fire-and-forget <delivery-id>] <text...>
+# Usage: fm-send.sh <target> [--resolve-key <key>]... [--captain-answer <task-id>]... [--no-decision] [--fire-and-forget <delivery-id>] <text...>
 #   <target> may be an exact task id, a legacy fm-<id> task label resolved
 #   through this home's state/<id>.meta, or an explicit well-formed backend
 #   target. fm-send refuses unresolved guesses rather than falling back to a
@@ -207,15 +207,15 @@
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
 #
-# When config/captain-decides-findings is present, a --resolve-key for an open
-# needs-decision or captain-held task also requires --captain-answer <task-id>.
-# That id must be the key or its legacy <target>-decision-<key> identity, and
-# bin/fm-captain-hold.sh answer-recorded must confirm a captain answer recorded
-# by `fm-captain-hold.sh answer`; the recorded answer must exist before delivery.
-# The flag also refuses a literal `no-mistakes axi respond` command when the
-# target has open needs-decision keys but none is named with --resolve-key. These checks happen
-# before either local inbox enqueue or remote transport, so both routes share
-# the same policy. With the flag absent, existing behavior is unchanged.
+# When config/captain-decides-findings is present and the task has open
+# needs-decision keys, each answer must name its key with --resolve-key and its
+# matching --captain-answer <task-id>; a send answering none must use
+# --no-decision. Answered keys and no-decision declarations are recorded in
+# the task status. The answer-record check is a firstmate attestation, not
+# proof of captain authorship. These checks apply to task metadata reached
+# through a selector or matching explicit endpoint, before local enqueue or
+# remote transport.
+# With the flag absent, existing behavior is unchanged.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
 # (default 1, 0 disables) before returning: submit confirmation only proves the
@@ -496,6 +496,7 @@ fm_send_add_resolve_key() { # <key>
 }
 CAPTAIN_ANSWER_IDS=
 CAPTAIN_ANSWER_USED_IDS=
+NO_DECISION=0
 fm_send_add_captain_answer() { # <task-id>
   local id=$1
   case "$id" in
@@ -535,9 +536,13 @@ while :; do
     fm_send_add_captain_answer "$2" || exit 1
     shift 2
     ;;
-  --captain-answer=*)
+  --no-decision)
     [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] || break
-    fm_send_add_captain_answer "${1#--captain-answer=}" || exit 1
+    [ "$NO_DECISION" = 0 ] || {
+      echo "error: duplicate --no-decision" >&2
+      exit 1
+    }
+    NO_DECISION=1
     shift
     ;;
   --fire-and-forget)
@@ -597,6 +602,21 @@ fi
 # send, is what keeps a mistyped key loud instead of delivering an answer that
 # silently leaves its decision open.
 RESOLVE_STATUS_FILE=
+CAPTAIN_POLICY_STATUS_FILE=
+CAPTAIN_POLICY_OPEN_SET=
+CAPTAIN_OPEN_NEEDS_KEYS=
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_META" ]; then
+  CAPTAIN_POLICY_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
+  CAPTAIN_POLICY_STATUS_FILE="$STATE/$CAPTAIN_POLICY_TASK_ID.status"
+  CAPTAIN_POLICY_OPEN_SET=$(status_open_decisions "$CAPTAIN_POLICY_STATUS_FILE")
+  while IFS=$'\t' read -r policy_key policy_verb _policy_summary; do
+    [ "$policy_verb" = needs-decision ] || continue
+    CAPTAIN_OPEN_NEEDS_KEYS="${CAPTAIN_OPEN_NEEDS_KEYS}${CAPTAIN_OPEN_NEEDS_KEYS:+ }$policy_key"
+  done <<EOF
+$CAPTAIN_POLICY_OPEN_SET
+EOF
+fi
+RESOLVE_DECISION_KEYS=
 # Which ledger each answered key belongs to. A key still open in the status log
 # is owned by the status log: fm-captain-hold's `complete` closes that live copy
 # at the moment it transfers a decision to its durable captain-held task, so
@@ -641,12 +661,12 @@ fm_send_captain_answer_for_key() { # <decision-key>
   for candidate in "$1" "$RESOLVE_TASK_ID-decision-$1"; do
     case " $CAPTAIN_ANSWER_IDS " in
     *" $candidate "*)
+      case " $CAPTAIN_ANSWER_USED_IDS " in
+      *" $candidate "*) continue ;;
+      esac
       if fm_send_captain_answer_recorded "$candidate"; then
         FM_SEND_MATCHED_CAPTAIN_ANSWER=$candidate
-        case " $CAPTAIN_ANSWER_USED_IDS " in
-        *" $candidate "*) : ;;
-        *) CAPTAIN_ANSWER_USED_IDS="${CAPTAIN_ANSWER_USED_IDS}${CAPTAIN_ANSWER_USED_IDS:+ }$candidate" ;;
-        esac
+        CAPTAIN_ANSWER_USED_IDS="${CAPTAIN_ANSWER_USED_IDS}${CAPTAIN_ANSWER_USED_IDS:+ }$candidate"
         return 0
       fi
       ;;
@@ -726,6 +746,8 @@ if [ -n "$RESOLVE_KEYS" ]; then
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
       RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
+      [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" != needs-decision ] ||
+        RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
       continue
       ;;
     esac
@@ -735,12 +757,14 @@ if [ -n "$RESOLVE_KEYS" ]; then
     if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && fm_send_captain_answer_for_key "$k"; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
       RESOLVE_PREANSWERED_HOLD_KEYS="${RESOLVE_PREANSWERED_HOLD_KEYS}${RESOLVE_PREANSWERED_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
+      RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
       continue
     fi
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
       if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
         fm_send_require_captain_answer "$k" || exit 1
         RESOLVE_PREANSWERED_HOLD_KEYS="${RESOLVE_PREANSWERED_HOLD_KEYS}${RESOLVE_PREANSWERED_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
+        RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
       fi
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
@@ -799,6 +823,51 @@ if [ -n "$RESOLVE_KEYS" ]; then
     fi
   done
 fi
+
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
+  if [ "$NO_DECISION" = 1 ]; then
+    [ -n "$CAPTAIN_OPEN_NEEDS_KEYS" ] || {
+      echo "error: --no-decision requires an open needs-decision key; nothing was sent" >&2
+      exit 1
+    }
+    [ -z "$RESOLVE_HOLD_KEYS" ] || {
+      echo "error: --no-decision cannot accompany a captain-held decision answer; nothing was sent" >&2
+      exit 1
+    }
+    for k in $RESOLVE_STATUS_KEYS; do
+      [ "$(_fm_open_set_verb "$CAPTAIN_POLICY_OPEN_SET" "$k")" != needs-decision ] || {
+        echo "error: --no-decision cannot accompany --resolve-key '$k' for an open needs-decision; nothing was sent" >&2
+        exit 1
+      }
+    done
+  elif [ -n "$CAPTAIN_OPEN_NEEDS_KEYS" ]; then
+    [ -n "$RESOLVE_DECISION_KEYS" ] || {
+      echo "error: open needs-decision key(s) '$CAPTAIN_OPEN_NEEDS_KEYS' require matching --resolve-key and --captain-answer declarations, or --no-decision; nothing was sent" >&2
+      exit 1
+    }
+  fi
+fi
+
+fm_send_log_captain_declaration() {
+  local append_rc=0 key
+  local -a declaration_lines=()
+  [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && {
+    [ -n "$CAPTAIN_OPEN_NEEDS_KEYS" ] || [ -n "$RESOLVE_DECISION_KEYS" ]
+  } || return 0
+  if [ "$NO_DECISION" = 1 ]; then
+    declaration_lines+=("note: decision-declaration: no-decision")
+  else
+    for key in $RESOLVE_DECISION_KEYS; do
+      declaration_lines+=("note: decision-declaration: answered-key=$key")
+    done
+  fi
+  fm_wake_status_append_self_announced "$STATE" "$CAPTAIN_POLICY_STATUS_FILE" \
+    "${declaration_lines[@]}" || append_rc=$?
+  if [ "$append_rc" -eq 2 ]; then
+    echo "error: the steer was delivered, but its captain-decision declaration could not be recorded in $CAPTAIN_POLICY_STATUS_FILE; do not resend" >&2
+    return 1
+  fi
+}
 
 # Close each answered decision in this home's ledger, only after the answer is
 # durably sent: enqueued on the inbox plane, submit-confirmed on the typed
@@ -909,31 +978,12 @@ if [ "${1:-}" = "--key" ]; then
   fi
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
   fm_send_record_interrupt "$semantic_key" || exit 1
+  fm_send_log_captain_declaration || exit 1
 else
   MESSAGE=$*
   if [ -z "${MESSAGE//[[:space:]]/}" ]; then
     echo "error: a text steer requires a nonempty message; nothing was sent (an empty marked request would deliver only marker and correlation bytes and leave the parent waiting on a reply to nothing)" >&2
     exit 1
-  fi
-  if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_SELECTOR" ] \
-    && [[ "$MESSAGE" == *"no-mistakes axi respond"* ]]; then
-    gate_status_file="$STATE/$(fm_send_id_from_meta "$TARGET_META").status"
-    gate_open_set=$(status_open_decisions "$gate_status_file")
-    gate_needs_key=
-    gate_key_resolved=0
-    while IFS=$'\t' read -r gate_key gate_verb _gate_summary; do
-      [ "$gate_verb" = needs-decision ] || continue
-      gate_needs_key=$gate_key
-      case " $RESOLVE_STATUS_KEYS " in
-      *" $gate_key "*) gate_key_resolved=1 ;;
-      esac
-    done <<EOF
-$gate_open_set
-EOF
-    if [ -n "$gate_needs_key" ] && [ "$gate_key_resolved" = 0 ]; then
-      echo "error: this no-mistakes gate response leaves open needs-decision key '$gate_needs_key' without --resolve-key; name the key and record its captain answer before sending; nothing was sent" >&2
-      exit 1
-    fi
   fi
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
@@ -1141,6 +1191,7 @@ EOF
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
+    fm_send_log_captain_declaration || exit 1
     exit 0
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
@@ -1218,6 +1269,7 @@ EOF
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
+    fm_send_log_captain_declaration || exit 1
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
@@ -1330,6 +1382,7 @@ EOF
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
+  fm_send_log_captain_declaration || exit 1
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
