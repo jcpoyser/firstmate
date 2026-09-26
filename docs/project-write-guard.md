@@ -28,6 +28,18 @@ For Git review, the denial directs the agent to read GitHub instead of fetching.
 
 There is no shell approval exception. Caller-supplied text cannot establish captain approval; route approved project changes to a worker.
 
+## Known limits
+
+This guard reduces accidental writes; it is not a security boundary. The following command-text forms are not currently blocked:
+
+- Git destinations not recognized by the policy: `git apply --directory=projects/foo /tmp/change.patch`, `git format-patch -o projects/foo HEAD~1`, `git clean -ffdx -- projects/foo`, and routing through `git -c core.worktree=projects/foo checkout -- file`.
+- Other shell writers: `tar -xf /tmp/change.tar -C projects/foo` and `rsync -a /tmp/tree/ projects/foo/`.
+- A `PWD` expansion after modeled `cd` can still use its original value, as in `cd projects/foo; printf x > "$PWD/new.txt"`.
+- Attached sed scripts such as `sed -e's/old/new/' -i projects/foo/file` are not reliably classified.
+- Patch input with `--strip=1` and native patch/apply_patch unified-diff `---`/`+++` headers are not reliably classified.
+
+The original explicit-approval-exception criterion was withdrawn; no shell approval exception is implemented.
+
 ## Harness wiring
 
 The project-write checker is registered beside the cd guard for Claude, Codex, Grok, OpenCode, Pi, omp, and Cursor.
