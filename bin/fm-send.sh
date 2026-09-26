@@ -204,8 +204,8 @@
 # manual close command, leaving the decision open to re-surface (the safe
 # direction). A send without the flag never closes anything: a routine steer,
 # working:, or done: event still cannot clear a captain decision. The flag is
-# refused with --key, with an explicit backend target (no task ledger in this
-# home), and with an empty message.
+# refused with --key, an unmapped explicit backend target (no task ledger in
+# this home), and an empty message.
 #
 # When config/captain-decides-findings is present and the task has an open
 # needs-decision key or unresolved captain-held inventory decision, each answer
@@ -695,7 +695,7 @@ fi
 
 FM_SEND_MATCHED_CAPTAIN_ANSWER=
 fm_send_captain_answer_recorded() { # <task-id>
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
     "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$1" >/dev/null
 }
 
@@ -771,8 +771,8 @@ if [ -n "$CAPTAIN_ANSWER_IDS" ]; then
 fi
 
 if [ -n "$RESOLVE_KEYS" ]; then
-  if [ -z "$TARGET_SELECTOR" ] || [ -z "$TARGET_META" ]; then
-    echo "error: --resolve-key needs a task selector resolved through this home's metadata; an explicit backend target has no decision ledger here" >&2
+  if [ -z "$TARGET_META" ]; then
+    echo "error: --resolve-key needs task metadata from this home; an unmapped explicit backend target has no decision ledger here" >&2
     exit 1
   fi
   if [ "${1:-}" = "--key" ]; then
@@ -908,7 +908,7 @@ fm_send_log_captain_declaration() {
   fm_wake_status_append_self_announced "$STATE" "$CAPTAIN_POLICY_STATUS_FILE" \
     "${declaration_lines[@]}" || append_rc=$?
   if [ "$append_rc" -eq 2 ]; then
-    echo "error: the steer was delivered, but its captain-decision declaration could not be recorded in $CAPTAIN_POLICY_STATUS_FILE; do not resend" >&2
+    echo "error: the captain-decision declaration could not be recorded in $CAPTAIN_POLICY_STATUS_FILE; nothing was sent" >&2
     return 1
   fi
 }
@@ -970,7 +970,8 @@ fm_send_feed_resolved_holds() { # <answer-text>
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
   [ -n "$lines" ] || return 0
-  if ! printf '%s' "$lines" | "$SCRIPT_DIR/fm-captain-hold.sh" answers \
+  if ! printf '%s' "$lines" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
     echo "error: the answer was delivered to $T, but this captain-held task could not be closed: ${RESOLVE_HOLD_KEYS}. Close it with fm-captain-hold.sh answer - do not resend the answer." >&2
     return 1
@@ -1003,6 +1004,7 @@ if [ "${1:-}" = "--key" ]; then
   esac
   key=$2
   semantic_key=$(fm_send_normalize_key "$key")
+  fm_send_log_captain_declaration || exit 1
   if [ "$TARGET_BACKEND" = remote ]; then
     FM_SEND_REMOTE_BUDGET=${FM_SEND_REMOTE_BUDGET:-30}
     case "$FM_SEND_REMOTE_BUDGET" in
@@ -1022,7 +1024,6 @@ if [ "${1:-}" = "--key" ]; then
   fi
   fm_send_clear_after_interrupt "$semantic_key" || exit 1
   fm_send_record_interrupt "$semantic_key" || exit 1
-  fm_send_log_captain_declaration || exit 1
 else
   MESSAGE=$*
   if [ -z "${MESSAGE//[[:space:]]/}" ]; then
@@ -1104,7 +1105,8 @@ else
   # marker-prefixed chat rather than a parser command anyway, so no remote
   # text has a typed plane to lose. An explicit backend target stays typed
   # even when it happens to match local metadata: it names an endpoint, not a
-  # task, the same boundary that keeps it unmarked and outside --resolve-key.
+  # task. A mapped explicit endpoint can use that task's decision ledger, but
+  # stays unmarked because it was not selected through its task selector.
   # Classification reads the pre-marker text so a marked secondmate request
   # and a plain crewmate steer classify identically. It deliberately does NOT
   # promise that a marked parser-native secondmate request executes as a parser
@@ -1166,6 +1168,12 @@ else
     remote_completion_unknown=0
     REMOTE_SEND_ARGS=("$TARGET_REMOTE_ID" "$MESSAGE")
     [ -z "$FIRE_AND_FORGET_ID" ] || REMOTE_SEND_ARGS+=(fire-and-forget)
+    fm_send_log_captain_declaration || {
+      fm_lock_release "$REMOTE_META_LOCK"
+      fm_send_known_undelivered_cleanup ||
+        echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+      exit 1
+    }
     # Each transport attempt is bounded by FM_SEND_REMOTE_BUDGET seconds.
     # fm_run_timed's 124 means the attempt was killed at the bound with remote
     # completion unknown - the enqueue may have landed - so it exits through
@@ -1235,7 +1243,6 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
-    fm_send_log_captain_declaration || exit 1
     exit 0
   fi
   if [ "$INBOX_PLANE" = 1 ]; then
@@ -1268,6 +1275,13 @@ else
       echo "error: steer not sent to $INBOX_TASK_ID: the task retired or changed endpoint during target resolution" >&2
       exit 1
     fi
+    fm_send_log_captain_declaration || {
+      fm_lock_release "$INBOX_META_LOCK"
+      if [ "$PENDING_REPLY_CREATED" = 1 ] && [ -n "$PENDING_REPLY_CORR" ]; then
+        fm_pending_reply_discard_undelivered "$STATE" "$PENDING_REPLY_CORR" || true
+      fi
+      exit 1
+    }
     if [ "${FM_SEND_IDEMPOTENT:-0}" = 1 ]; then
       INBOX_RECORD=$(fm_task_inbox_write_idempotent "$STATE" "$INBOX_TASK_ID" "$MESSAGE" \
         "${FIRE_AND_FORGET_ID:+fire-and-forget}") || inbox_write_rc=$?
@@ -1313,7 +1327,6 @@ else
       fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
       fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
     fi
-    fm_send_log_captain_declaration || exit 1
     # Ring the doorbell, best-effort: no ring outcome changes the exit status,
     # because the watcher owns loss detection from here, either through its
     # bounded re-ring ladder or direct unavailable-endpoint recovery.
@@ -1361,6 +1374,11 @@ else
   # verdict preserves the loud refusal boundary. Only LOCAL targets reach this
   # block: remote text rides the inbox leg above, and remote --key exits
   # earlier.
+  fm_send_log_captain_declaration || {
+    fm_send_known_undelivered_cleanup ||
+      echo "error: known-undelivered pending-reply state could not be reset for $TARGET_TASK_ID" >&2
+    exit 1
+  }
   send_rc=0
   if verdict=$(fm_backend_send_text_submit "$TARGET_BACKEND" "$T" "$MESSAGE" "$retries" "$sleep_s" "$settle" "$EXPECTED_LABEL"); then
     :
@@ -1426,7 +1444,6 @@ else
     fm_send_close_resolved_keys "$RESOLVE_ANSWER_TEXT" || exit 1
     fm_send_feed_resolved_holds "$RESOLVE_ANSWER_TEXT" || exit 1
   fi
-  fm_send_log_captain_declaration || exit 1
   # Submit landed with exact empty. Confirmation only proves the text was
   # accepted; the harness still needs a beat to spin up the
   # turn before its busy footer shows. Pause so an immediate peek catches the
