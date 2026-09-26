@@ -117,13 +117,14 @@ setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
 setup_captain_answer() {  # <home> <task-id> <answer>
   local home=$1 id=$2 answer=$3 backlog="$1/data/backlog.md" decision="$1/data/decision.txt"
   mkdir -p "$home/data" "$home/config"
-  cat > "$home/.tasks.toml" <<'EOF'
+  if [ ! -f "$home/.tasks.toml" ]; then
+    cat > "$home/.tasks.toml" <<'EOF'
 backend = "markdown"
 
 [markdown]
 path = "data/backlog.md"
 EOF
-  cat > "$backlog" <<'EOF'
+    cat > "$backlog" <<'EOF'
 # Backlog
 
 ## In flight
@@ -132,6 +133,7 @@ EOF
 
 ## Done
 EOF
+  fi
   FM_TASKS_AXI_COMPATIBLE=1 tasks-axi add "$id" "Captain decision for $id" --kind captain --file "$backlog" >/dev/null
   FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CAPTAIN_HOLD" hold "$id" \
     --reason "captain decision required" >/dev/null
@@ -238,24 +240,107 @@ test_remote_captain_decision_guard_runs_before_transport() {
   pass "fm-send applies captain-answer enforcement before remote delivery"
 }
 
-test_no_mistakes_response_cannot_bypass_open_decision() {
+test_decision_declaration_is_structural_and_logged() {
   local dir fb log err home rc
-  dir="$TMP_ROOT/gate-bypass"; mkdir -p "$dir"
+  dir="$TMP_ROOT/decision-declaration"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
-  home=$(setup_home gate-bypass)
+  home=$(setup_home decision-declaration)
   mkdir -p "$home/config"
   : > "$home/config/captain-decides-findings"
   fm_write_meta "$home/state/tg1.meta" "window=sess:fm-tg1" "kind=ship"
-  printf 'needs-decision [key=nm-run-review]: review decision\n' > "$home/state/tg1.status"
+  printf 'needs-decision [key=review]: review decision\nblocked [key=dependency]: refresh dependency\n' \
+    > "$home/state/tg1.status"
 
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
-    "$SEND" tg1 'no-mistakes axi respond --action approve' >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a no-mistakes response command bypassed an open needs-decision key"
-  assert_contains "$(cat "$err")" "open needs-decision key 'nm-run-review' without --resolve-key" \
-    "the bypass refusal should identify the open decision and required key flag"
-  [ ! -s "$log" ] || fail "a refused no-mistakes response command was typed"
-  [ ! -e "$home/state/tg1.inbox/001.msg" ] || fail "a refused no-mistakes response command reached the worker"
-  pass "fm-send blocks a literal no-mistakes response command that omits an open decision key"
+    "$SEND" tg1 'approve every other finding' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an undeclared steer bypassed an open needs-decision key"
+  assert_contains "$(cat "$err")" "require matching --resolve-key and --captain-answer declarations, or --no-decision" \
+    "the structural refusal should request an explicit decision declaration"
+  [ ! -e "$home/state/tg1.inbox/001.msg" ] || fail "an undeclared steer reached the worker"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" sess:fm-tg1 'approve every other finding' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicit endpoint matching task metadata bypassed the decision declaration"
+  [ ! -s "$log" ] || fail "the undeclared explicit-endpoint steer was typed"
+
+  run_send "$fb" "$home" "$log" tg1 --no-decision --resolve-key dependency 'refresh dependency'; rc=$?
+  expect_code 0 "$rc" "a no-decision declaration may accompany an unrelated blocked-key resolution"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/tg1.status" \
+    | grep -qF 'note: decision-declaration: no-decision' \
+    || fail "the no-decision declaration was not logged in task status"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/tg1.status" \
+    | grep -qF 'resolved [key=dependency]: answered: refresh dependency' \
+    || fail "the unrelated blocker resolution did not remain effective"
+
+  run_send "$fb" "$home" "$log" tg1 --no-decision --key Enter; rc=$?
+  expect_code 0 "$rc" "a no-decision declaration should also cover a key send"
+  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$home/state/tg1.status" \
+    | grep -Fc 'note: decision-declaration: no-decision')" -eq 2 ] \
+    || fail "the key-send no-decision declaration was not recorded"
+  pass "fm-send requires and logs structural decision declarations without inspecting steer wording"
+}
+
+test_no_decision_cannot_resolve_a_needs_decision() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; conflicting declaration test needs a recorded answer)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/no-decision-conflict"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home no-decision-conflict)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tg2.meta" "window=sess:fm-tg2" "kind=ship"
+  printf 'needs-decision [key=review]: review decision\n' > "$home/state/tg2.status"
+  setup_captain_answer "$home" review 'Approve the reviewed change.'
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tg2 --no-decision --resolve-key review \
+    --captain-answer review 'Approve the reviewed change.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--no-decision accompanied an answer to its needs-decision key"
+  assert_contains "$(cat "$err")" "--no-decision cannot accompany --resolve-key 'review'" \
+    "the conflicting declaration should be identified"
+  [ ! -e "$home/state/tg2.inbox/001.msg" ] || fail "the conflicting decision declaration reached the worker"
+  pass "fm-send refuses --no-decision when the same send resolves a needs-decision"
+}
+
+test_multiple_needs_decisions_require_distinct_recorded_answers() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; captain-answer enforcement requires its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/multiple-captain-answers"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home multiple-captain-answers)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tm1.meta" "window=sess:fm-tm1" "kind=ship"
+  printf 'needs-decision [key=nm-a]: first review\nneeds-decision [key=nm-b]: second review\n' \
+    > "$home/state/tm1.status"
+  setup_captain_answer "$home" nm-a 'Approve A.'
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tm1 --resolve-key nm-a --resolve-key nm-b \
+    --captain-answer nm-a 'Approve both findings.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "one recorded answer authorized two needs-decision keys"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer for this decision" \
+    "the incomplete multi-key answer should identify its missing record"
+  [ ! -e "$home/state/tm1.inbox/001.msg" ] || fail "the incompletely authorized multi-key answer reached the worker"
+
+  setup_captain_answer "$home" nm-b 'Approve B.'
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tm1 --resolve-key nm-a --resolve-key nm-b \
+    --captain-answer nm-a --captain-answer nm-b 'Approve both findings.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "separate recorded answers should authorize their matching decisions"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/tm1.status" \
+    | grep -qF 'resolved [key=nm-a]: answered: Approve both findings.' \
+    || fail "the first separately authorized decision was not closed"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/tm1.status" \
+    | grep -qF 'resolved [key=nm-b]: answered: Approve both findings.' \
+    || fail "the second separately authorized decision was not closed"
+  pass "fm-send requires a distinct recorded captain answer for every needs-decision key"
 }
 
 test_answer_send_closes_open_decision() {
@@ -1050,7 +1135,9 @@ test_captain_decision_flag_absent_preserves_send_behavior
 test_captain_decision_flag_requires_recorded_answer
 test_captain_decision_flag_accepts_recorded_answer
 test_remote_captain_decision_guard_runs_before_transport
-test_no_mistakes_response_cannot_bypass_open_decision
+test_decision_declaration_is_structural_and_logged
+test_no_decision_cannot_resolve_a_needs_decision
+test_multiple_needs_decisions_require_distinct_recorded_answers
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
