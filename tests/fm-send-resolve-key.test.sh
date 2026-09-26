@@ -417,6 +417,68 @@ test_transferred_held_decision_requires_its_recorded_answer() {
   pass "fm-send gates transferred holds on their own recorded captain answer"
 }
 
+test_captain_answer_uses_authoritative_hold_identity() {
+  local dir fb home log err rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; hold identity test needs its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/captain-answer-authority"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home captain-answer-authority)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/ta1.meta" "window=sess:fm-ta1" "kind=ship"
+  printf 'needs-decision [key=foo]: choose a route\n' > "$home/state/ta1.status"
+  setup_captain_hold "$home" foo
+  setup_captain_answer "$home" ta1-decision-foo 'Legacy answer for the wrong identity.'
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" ta1 --resolve-key foo \
+    --captain-answer ta1-decision-foo 'Use the north route.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a legacy answer authorized an existing exact hold identity"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer for this decision" \
+    "the exact task should remain the answer owner"
+  [ ! -e "$home/state/ta1.inbox/001.msg" ] || fail "the wrong-identity answer reached an open status decision"
+
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" complete ta1 foo >/dev/null
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" ta1 --resolve-key foo \
+    --captain-answer ta1-decision-foo 'Use the north route.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a legacy answer authorized a transferred exact hold identity"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer for this decision" \
+    "the transferred exact task should remain the answer owner"
+  [ ! -e "$home/state/ta1.inbox/001.msg" ] || fail "the wrong-identity answer reached the transferred hold"
+
+  home=$(setup_home captain-open-hold-identity)
+  fm_write_meta "$home/state/ta2.meta" "window=sess:fm-ta2" "kind=ship"
+  setup_captain_answer "$home" baz 'Answer recorded for exact baz.'
+  setup_captain_hold "$home" ta2-decision-baz
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" ta2 --resolve-key baz 'Do not answer the legacy row.' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an open legacy row displaced an existing exact task identity"
+  [ ! -e "$home/state/ta2.inbox/001.msg" ] || fail "the exact-identity refusal reached the worker"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" open ta2-decision-baz >/dev/null \
+    || fail "the wrong legacy hold was closed by the rejected answer"
+
+  home=$(setup_home captain-legacy-identity)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/ta3.meta" "window=sess:fm-ta3" "kind=ship"
+  printf 'needs-decision [key=bar]: choose a route\n' > "$home/state/ta3.status"
+  setup_captain_answer "$home" ta3-decision-bar 'Legacy owner answer.'
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" ta3 --resolve-key bar \
+    --captain-answer ta3-decision-bar 'Use the legacy route.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the legacy identity should remain valid when no exact task exists"
+  grep -qF 'Use the legacy route.' "$home/state/ta3.inbox/001.msg" \
+    || fail "the valid legacy answer did not reach the worker"
+  pass "fm-send binds recorded answers to the exact-first authoritative hold identity"
+}
+
 test_answer_send_closes_open_decision() {
   local dir fb log home rc out
   dir="$TMP_ROOT/closes"; mkdir -p "$dir"
@@ -1213,6 +1275,7 @@ test_decision_declaration_is_structural_and_logged
 test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
+test_captain_answer_uses_authoritative_hold_identity
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake

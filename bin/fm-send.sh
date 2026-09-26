@@ -639,30 +639,34 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 # derived `<task>-decision-<key>` identity for pre-collapse rows. Answerable
 # means not closed and still carrying the captain-hold annotations tasks-axi
 # preserves even past a hold-until date.
-fm_send_hold_resolved_id() { # <task-id> <decision-key>
-  local show id state hold_kind rc
+FM_SEND_AUTHORITATIVE_HOLD_ID=
+FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
+fm_send_authoritative_hold() {
+  local id rc
+  FM_SEND_AUTHORITATIVE_HOLD_ID=
+  FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
   for id in "$2" "$1-decision-$2"; do
-    if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
-      if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
-        "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" >/dev/null 2>&1; then
-        printf '%s\n' "$id"
-        return 0
-      else
-        rc=$?
-        [ "$rc" -eq 1 ] || return "$rc"
-      fi
-    else
-      command -v tasks-axi >/dev/null 2>&1 || return 1
-      show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
-      state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
-      hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
-      [ "$state" != "done" ] || continue
-      [ "$hold_kind" = captain ] || continue
-      printf '%s\n' "$id"
+    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+      "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" --distinguish-absent >/dev/null 2>&1; then
+      FM_SEND_AUTHORITATIVE_HOLD_ID=$id
+      FM_SEND_AUTHORITATIVE_HOLD_OPEN=1
       return 0
+    else
+      rc=$?
+      case "$rc" in
+        1) FM_SEND_AUTHORITATIVE_HOLD_ID=$id; return 0 ;;
+        3) : ;;
+        *) return "$rc" ;;
+      esac
     fi
   done
   return 1
+}
+
+fm_send_hold_resolved_id() { # <task-id> <decision-key>
+  fm_send_authoritative_hold "$1" "$2" || return $?
+  [ "$FM_SEND_AUTHORITATIVE_HOLD_OPEN" = 1 ] || return 1
+  printf '%s\n' "$FM_SEND_AUTHORITATIVE_HOLD_ID"
 }
 
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; then
@@ -698,20 +702,20 @@ fm_send_captain_answer_recorded() { # <task-id>
 fm_send_captain_answer_for_key() { # <decision-key>
   local candidate
   FM_SEND_MATCHED_CAPTAIN_ANSWER=
-  for candidate in "$1" "$RESOLVE_TASK_ID-decision-$1"; do
-    case " $CAPTAIN_ANSWER_IDS " in
-    *" $candidate "*)
-      case " $CAPTAIN_ANSWER_USED_IDS " in
-      *" $candidate "*) continue ;;
-      esac
-      if fm_send_captain_answer_recorded "$candidate"; then
-        FM_SEND_MATCHED_CAPTAIN_ANSWER=$candidate
-        CAPTAIN_ANSWER_USED_IDS="${CAPTAIN_ANSWER_USED_IDS}${CAPTAIN_ANSWER_USED_IDS:+ }$candidate"
-        return 0
-      fi
-      ;;
+  fm_send_authoritative_hold "$RESOLVE_TASK_ID" "$1" || return $?
+  candidate=$FM_SEND_AUTHORITATIVE_HOLD_ID
+  case " $CAPTAIN_ANSWER_IDS " in
+  *" $candidate "*)
+    case " $CAPTAIN_ANSWER_USED_IDS " in
+    *" $candidate "*) return 1 ;;
     esac
-  done
+    if fm_send_captain_answer_recorded "$candidate"; then
+      FM_SEND_MATCHED_CAPTAIN_ANSWER=$candidate
+      CAPTAIN_ANSWER_USED_IDS="${CAPTAIN_ANSWER_USED_IDS}${CAPTAIN_ANSWER_USED_IDS:+ }$candidate"
+      return 0
+    fi
+    ;;
+  esac
   return 1
 }
 
