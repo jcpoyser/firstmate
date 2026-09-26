@@ -30,6 +30,9 @@
 #      (the operator path the OPEN DECISIONS hint names), while an unrelated
 #      writer's answered: note still cannot hijack or clear that key. A reserved
 #      key this send cannot close refuses before anything is sent.
+#   9. A mapped explicit endpoint may use its local decision ledger, answer
+#      records cannot cross home boundaries, and declaration logging precedes
+#      delivery so a failed append prevents the steer.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -67,6 +70,9 @@ case "${1:-}" in
     done
     if [ "$literal" = 1 ]; then
       printf '%s' "${1:-}" >> "$FM_SEND_LOG"
+      if [ -n "${FM_FAKE_TMUX_CHMOD_STATUS_ON_SEND:-}" ]; then
+        chmod 0444 "$FM_FAKE_TMUX_CHMOD_STATUS_ON_SEND"
+      fi
     fi
     exit 0 ;;
   display-message)
@@ -223,6 +229,33 @@ test_captain_decision_flag_accepts_recorded_answer() {
   pass "fm-send accepts a named captain answer recorded by fm-captain-hold answer"
 }
 
+test_mapped_explicit_endpoint_can_resolve_decision() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; captain-answer enforcement requires its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/mapped-explicit-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home mapped-explicit-answer)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/te1.meta" "window=sess:fm-te1" "kind=ship"
+  printf 'needs-decision [key=route-choice]: select a route\n' > "$home/state/te1.status"
+  setup_captain_answer "$home" route-choice 'Use route C.'
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" sess:fm-te1 \
+    --resolve-key route-choice --captain-answer route-choice 'Use route C.' \
+    >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a mapped explicit endpoint with task metadata should use this home's decision ledger: $(cat "$err")"
+  grep -qF 'Use route C.' "$log" || fail "the mapped explicit endpoint did not receive the answer"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/te1.status" \
+    | grep -qF 'resolved [key=route-choice]: answered: Use route C.' \
+    || fail "the mapped explicit endpoint answer did not close its decision"
+  pass "fm-send allows a mapped explicit endpoint to resolve its task's recorded decision"
+}
+
 test_remote_captain_decision_guard_runs_before_transport() {
   local dir fb log ssh_log err home rc
   dir="$TMP_ROOT/remote-captain-required"; mkdir -p "$dir"
@@ -283,6 +316,68 @@ test_decision_declaration_is_structural_and_logged() {
     | grep -Fc 'note: decision-declaration: no-decision')" -eq 2 ] \
     || fail "the key-send no-decision declaration was not recorded"
   pass "fm-send requires and logs structural decision declarations without inspecting steer wording"
+}
+
+test_no_decision_declaration_append_failure_prevents_delivery() {
+  local dir fb log err home status rc
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'ok - skipped (read-only status append refusal is not testable as root)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/no-decision-append-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home no-decision-append-fail)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tdf.meta" "window=sess:fm-tdf" "kind=ship"
+  status="$home/state/tdf.status"
+  printf 'needs-decision [key=review]: choose a route\n' > "$status"
+  chmod 0444 "$status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" tdf --no-decision 'routine progress' >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$status"
+  [ "$rc" -ne 0 ] || fail "the steer was delivered despite a failed declaration append"
+  assert_contains "$(cat "$err")" "captain-decision declaration could not be recorded" \
+    "the append refusal should identify the missing declaration"
+  assert_contains "$(cat "$err")" "nothing was sent" "the append refusal should make the delivery outcome clear"
+  [ ! -e "$home/state/tdf.inbox/001.msg" ] || fail "the steer reached the worker without its declaration record"
+  [ ! -s "$log" ] || fail "the steer reached a terminal without its declaration record"
+  pass "fm-send refuses delivery when it cannot record the no-decision declaration"
+}
+
+test_no_decision_declaration_precedes_later_close_failure() {
+  local dir fb log err home status rc
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'ok - skipped (read-only status append refusal is not testable as root)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/declaration-before-close-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home declaration-before-close-fail)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tdc.meta" "window=sess:fm-tdc" "kind=ship"
+  status="$home/state/tdc.status"
+  printf 'needs-decision [key=review]: choose a route\nblocked [key=dependency]: refresh dependency\n' \
+    > "$status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_TMUX_CHMOD_STATUS_ON_SEND="$status" \
+    "$SEND" sess:fm-tdc --no-decision --resolve-key dependency 'refresh dependency' \
+    >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$status"
+  [ "$rc" -ne 0 ] || fail "the expected post-delivery close failure did not occur"
+  assert_contains "$(cat "$err")" "the answer was delivered" \
+    "the close failure should report that delivery already occurred"
+  grep -qF 'refresh dependency' "$log" || fail "the answer was not delivered before the close failure"
+  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$status" \
+    | grep -Fc 'note: decision-declaration: no-decision')" -eq 1 ] \
+    || fail "the declaration was not durably logged before the later close failure"
+  if grep -F 'resolved [key=dependency]' "$status" >/dev/null; then
+    fail "the deliberately failed close unexpectedly appeared in the status record"
+  fi
+  pass "fm-send records the no-decision declaration before a later close failure"
 }
 
 test_no_decision_cannot_resolve_a_needs_decision() {
@@ -346,6 +441,81 @@ test_multiple_needs_decisions_require_distinct_recorded_answers() {
     | grep -qF 'resolved [key=nm-b]: answered: Approve both findings.' \
     || fail "the second separately authorized decision was not closed"
   pass "fm-send requires a distinct recorded captain answer for every needs-decision key"
+}
+
+test_captain_answer_scope_is_this_home() {
+  local dir fb log err home foreign rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; captain-answer scope test needs its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/captain-answer-home-scope"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home captain-answer-home-scope)
+  foreign=$(setup_home captain-answer-foreign-data)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/thscope.meta" "window=sess:fm-thscope" "kind=ship"
+  printf 'needs-decision [key=scope-choice]: choose a route\n' > "$home/state/thscope.status"
+  setup_captain_hold "$home" scope-choice
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" complete thscope scope-choice >/dev/null
+  setup_captain_answer "$foreign" scope-choice 'A foreign answer must not authorize this home.'
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$foreign/data" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" thscope --resolve-key scope-choice \
+    --captain-answer scope-choice 'Use the local route.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a different home's answer record authorized this decision"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer" \
+    "the foreign answer refusal should identify the local record requirement"
+  [ ! -e "$home/state/thscope.inbox/001.msg" ] || fail "the foreign answer reached this home's worker"
+
+  printf '%s\n' 'The local captain chose the route.' > "$home/local-answer.txt"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" answer scope-choice --decision-file "$home/local-answer.txt" >/dev/null
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$foreign/data" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" thscope --resolve-key scope-choice \
+    --captain-answer scope-choice 'Use the local route.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "this home's recorded captain answer should still authorize its decision: $(cat "$err")"
+  pass "fm-send captain-answer checks use only this home's recorded answer"
+}
+
+test_resolved_hold_answer_intake_uses_canonical_data() {
+  local dir fb log err home foreign rc local_show foreign_show
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; keyed-answer intake needs its durable backlog)\n'
+    return 0
+  fi
+  if ! env -u FM_TASKS_AXI_COMPATIBLE bash -c ". \"\$1\"; fm_tasks_axi_compatible" \
+    _ "$ROOT/bin/fm-tasks-axi-lib.sh" >/dev/null 2>&1; then
+    printf 'ok - skipped (installed tasks-axi is not compatible with nested captain-answer intake)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/captain-answer-intake-scope"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home captain-answer-intake-local)
+  foreign=$(setup_home captain-answer-intake-foreign)
+  fm_write_meta "$home/state/thintake.meta" "window=sess:fm-thintake" "kind=ship"
+  printf 'needs-decision [key=intake-choice]: choose a route\n' > "$home/state/thintake.status"
+  setup_captain_hold "$home" intake-choice
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" complete thintake intake-choice >/dev/null
+  setup_captain_hold "$foreign" intake-choice
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" \
+    FM_DATA_OVERRIDE="$foreign/data" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" thintake --resolve-key intake-choice \
+    'Use the local intake path.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the keyed-answer intake should use this home's held task: $(cat "$err")"
+  local_show=$(cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi show intake-choice --full \
+    --file "$home/data/backlog.md") || fail "could not inspect the local captain-held task"
+  foreign_show=$(cd "$foreign" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi show intake-choice --full \
+    --file "$foreign/data/backlog.md") || fail "could not inspect the foreign captain-held task"
+  assert_contains "$local_show" "state: done" "the local held task was not closed by its keyed answer"
+  assert_contains "$foreign_show" "held: yes" "the foreign held task was unexpectedly changed"
+  assert_not_contains "$foreign_show" "state: done" "the foreign held task was closed through FM_DATA_OVERRIDE"
+  pass "fm-send keyed-answer intake uses only this home's data"
 }
 
 test_transferred_held_decision_requires_its_recorded_answer() {
@@ -1270,8 +1440,13 @@ test_decision_answer_partition_relocates_under_the_record() {
 test_captain_decision_flag_absent_preserves_send_behavior
 test_captain_decision_flag_requires_recorded_answer
 test_captain_decision_flag_accepts_recorded_answer
+test_mapped_explicit_endpoint_can_resolve_decision
+test_captain_answer_scope_is_this_home
+test_resolved_hold_answer_intake_uses_canonical_data
 test_remote_captain_decision_guard_runs_before_transport
 test_decision_declaration_is_structural_and_logged
+test_no_decision_declaration_append_failure_prevents_delivery
+test_no_decision_declaration_precedes_later_close_failure
 test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
