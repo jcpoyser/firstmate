@@ -11,7 +11,7 @@ Start with the directory layout, then use the setting reference for the behavior
 | Task windows and worker tools | [Runtime backend](#runtime-backend-configbackend--fm_backend) and [harness support](#harness-support) |
 | Worker permissions, accounts, or environment | [Claude permission mode](#claude-permission-mode-configclaude-permission-mode), [worker account pin](#worker-account-pin-configclaude-account-configpi-account), and [worker launch environment](#worker-launch-environment-configlaunch-env-allowlist) |
 | Backlog, preferences, and memory | [Backlog backend](#backlog-backend-taskstoml--configbacklog-backend), [captain preferences](#captain-preferences-datacaptainmd--datacaptain-sharedmd), and [startup memory budget](#startup-memory-budget-configstartup-memory-budget) |
-| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), and [Calm preference](#calm-preference-configcalm) |
+| Supervision and presentation | [Pi supervision branch](#pi-supervision-branch), [supervision host](#supervision-host-configsupervision-host), [captain decision enforcement](#captain-decision-enforcement-configcaptain-decides-findings), and [Calm preference](#calm-preference-configcalm) |
 | Persistent secondmates | [Secondmate routes](#secondmate-routes-datasecondmatesmd) |
 | Per-run overrides and tuning | [Environment variables](#environment-variables) |
 
@@ -127,6 +127,15 @@ Untracked files and directories whose names begin with `scratchpad` are also git
 The shared orchestrator behavior lives in [`AGENTS.md`](../AGENTS.md).
 Edit it like any prompt when the fleet is empty.
 While tasks are in flight, dispatch shared-repo edits to a crewmate.
+
+## Captain decision enforcement (config/captain-decides-findings)
+
+The optional local, gitignored `config/captain-decides-findings` presence flag requires a recorded captain answer before `fm-send --resolve-key` can answer an open `needs-decision` or captain-held decision.
+The send must name the matching captain-held task with `--captain-answer <task-id>`, and its answer must have been recorded through `bin/fm-captain-hold.sh answer`.
+With the flag present, a literal `no-mistakes axi respond` command cannot be sent unless at least one open `needs-decision` key is named with `--resolve-key`.
+The response-command guard recognizes that literal command form; aliases or wrappers are not inferred.
+When the flag is absent, send behavior is unchanged.
+The flag is local to this home and is not inherited by secondmate homes.
 
 ## Calm preference (config/calm)
 
