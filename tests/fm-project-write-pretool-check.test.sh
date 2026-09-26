@@ -8,6 +8,10 @@ set -u
 
 fm_git_identity fmtest fmtest@example.invalid
 TMP_ROOT=$(fm_test_tmproot fm-project-write-pretool-check)
+SAFE_PATCH="$TMP_ROOT/safe.diff"
+PROJECT_PATCH="$TMP_ROOT/project.diff"
+printf '%s\n' '--- a/safe.txt' '+++ b/safe.txt' '@@ -1 +1 @@' '-before' '+after' > "$SAFE_PATCH"
+printf '%s\n' '--- a/projects/foo/patched.txt' '+++ b/projects/foo/patched.txt' '@@ -1 +1 @@' '-before' '+after' > "$PROJECT_PATCH"
 
 install_guard() {
   local dir=$1
@@ -67,12 +71,19 @@ test_git_state_changes_are_denied() {
   expect_deny 'env GIT_DIR=projects/foo/.git git fetch origin'
   expect_deny 'git init --separate-git-dir=projects/foo/.git /tmp/fm-project-write-separate-dir'
   expect_deny 'git init --separate-git-dir projects/foo/.git /tmp/fm-project-write-separate-dir-2'
+  expect_deny 'git archive -o projects/foo/out.tar HEAD'
+  expect_deny 'git checkout-index --all --prefix=projects/foo/'
+  expect_deny 'git checkout-index --all --prefix projects/foo/'
+  expect_deny 'git bundle create projects/foo/x.bundle HEAD'
   expect_deny 'p=projects/foo; git -C "$p" fetch origin'
   expect_deny 'git worktree add projects/foo'
   expect_deny 'git worktree add -b scratch projects/foo'
   expect_deny 'git submodule add https://example.invalid/repo.git projects/foo/module'
   expect_allow 'git worktree list'
   expect_allow 'git -C projects/foo worktree list'
+  expect_allow 'git archive -o /tmp/fm-project-write-safe.tar HEAD'
+  expect_allow 'git checkout-index --all --prefix=/tmp/fm-project-write-safe/'
+  expect_allow 'git bundle create /tmp/fm-project-write-safe.bundle HEAD'
   pass "project-write guard: denies the requested Git state-changing commands"
 }
 
@@ -96,8 +107,19 @@ test_file_mutations_are_denied() {
   expect_deny 'cp notes.txt projects/foo/file'
   expect_deny 'cp -t projects/foo notes.txt'
   expect_deny 'echo changed > projects/foo/file'
+  expect_deny 'printf x &> projects/foo/both-streams'
+  expect_deny 'printf x &>> projects/foo/appended-both-streams'
+  expect_deny 'printf x >| projects/foo/forced-redirection'
+  expect_deny "sed -Ei 's/old/new/' projects/foo/sed-file"
+  expect_deny "perl -pi -e 's/old/new/' projects/foo/perl-file"
   expect_deny 'patch projects/foo/file < /tmp/update.diff'
   expect_deny 'patch -d projects/foo < /tmp/update.diff'
+  expect_deny "patch -p1 < \"$PROJECT_PATCH\""
+  expect_deny "patch -p1 < \"$TMP_ROOT/missing.diff\""
+  expect_deny "printf '%s\\n' '--- a/projects/foo/piped.txt' '+++ b/projects/foo/piped.txt' | patch -p1"
+  local heredoc_patch
+  heredoc_patch=$(printf '%s\n' "patch -p1 <<'PATCH'" '--- a/projects/foo/heredoc.txt' '+++ b/projects/foo/heredoc.txt' '@@ -1 +1 @@' '-before' '+after' 'PATCH')
+  expect_deny "$heredoc_patch"
   expect_deny 'dd if=/dev/zero of=projects/foo/file'
   expect_deny 'find projects/foo -delete'
   expect_deny 'find projects/foo -type f -exec rm -f {} +'
@@ -115,9 +137,15 @@ test_file_mutations_are_denied() {
   expect_deny "bash -c 'git -C projects/foo fetch origin'"
   expect_deny 'git diff --output=projects/foo/diff.txt'
   expect_allow 'echo changed > /tmp/fm-project-write-safe-file'
+  expect_allow 'printf x &> /tmp/fm-project-write-both-streams'
+  expect_allow 'printf x &>> /tmp/fm-project-write-appended-both-streams'
+  expect_allow 'printf x >| /tmp/fm-project-write-forced-redirection'
+  expect_allow "sed -Ei 's/old/new/' /tmp/fm-project-write-sed-safe"
+  expect_allow "perl -pi -e 's/old/new/' /tmp/fm-project-write-perl-safe"
   expect_allow 'f=/tmp/fm-project-write-variable-safe; printf x > "$f"'
   expect_allow 'find projects/foo -type f -exec cat {} +'
-  expect_allow 'patch -i /tmp/fm-project-write-input.diff'
+  expect_allow "patch -i \"$SAFE_PATCH\""
+  expect_allow 'patch /tmp/fm-project-write-patch-target'
   expect_allow 'sed -n 1p projects/foo/file'
   pass "project-write guard: blocks file writes while allowing reads and external writes"
 }
@@ -185,15 +213,89 @@ test_worker_worktree_is_inert() {
 }
 
 test_adapter_configurations_and_open_code_plugin() {
-  local config plugin out rc
-  jq -e '[.hooks.PreToolUse[]? | select(.matcher == ".*") | .hooks[]?.command] | any(.[]; contains("fm-project-write-pretool-check.sh"))' "$ROOT/.claude/settings.json" >/dev/null \
-    || fail "Claude does not register the project-write checker for every tool"
-  jq -e '[.hooks.PreToolUse[]? | select(.matcher == ".*") | .hooks[]?.command] | any(.[]; contains("fm-project-write-pretool-check.sh"))' "$ROOT/.codex/hooks.json" >/dev/null \
-    || fail "Codex does not register the project-write checker for every tool"
-  jq -e '[.hooks.preToolUse[]? | select(.matcher == ".*") | .command] | any(.[]; contains("fm-project-write-pretool-check.sh"))' "$ROOT/.cursor/hooks.json" >/dev/null \
-    || fail "Cursor does not register the project-write checker for every tool"
-  jq -e '[.hooks.PreToolUse[]? | select(.matcher == ".*") | .hooks[]?.command] | any(.[]; contains("fm-project-write-pretool-check.sh"))' "$ROOT/.grok/hooks/fm-primary-project-write-check.json" >/dev/null \
-    || fail "Grok does not register the project-write checker for every tool"
+  local plugin out rc adapter_trace
+  mkdir -p "$PRIMARY/.claude" "$PRIMARY/.codex" "$PRIMARY/.cursor" "$PRIMARY/.grok/hooks"
+  cp "$ROOT/.claude/settings.json" "$PRIMARY/.claude/settings.json"
+  cp "$ROOT/.codex/hooks.json" "$PRIMARY/.codex/hooks.json"
+  cp "$ROOT/.cursor/hooks.json" "$PRIMARY/.cursor/hooks.json"
+  cp "$ROOT/.grok/hooks/fm-primary-project-write-check.json" "$PRIMARY/.grok/hooks/"
+  mv "$PRIMARY/bin/fm-project-write-pretool-check.sh" "$PRIMARY/bin/fm-project-write-pretool-check.real.sh"
+  cat > "$PRIMARY/bin/fm-project-write-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ -n "${FM_PROJECT_WRITE_ADAPTER_TRACE:-}" ]; then
+  printf 'invoked\n' >> "$FM_PROJECT_WRITE_ADAPTER_TRACE"
+fi
+exec "$(dirname "${BASH_SOURCE[0]}")/fm-project-write-pretool-check.real.sh" "$@"
+SH
+  chmod +x "$PRIMARY/bin/fm-project-write-pretool-check.sh" "$PRIMARY/bin/fm-project-write-pretool-check.real.sh"
+  adapter_trace="$PRIMARY/state/adapter-hook.trace"
+  out=$(FM_HOME="$PRIMARY" FM_STATE_OVERRIDE="$PRIMARY/state" FIXTURE="$PRIMARY" TRACE="$adapter_trace" node --input-type=module 2>&1 <<'NODE'
+import { readFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { join } from "node:path";
+
+const fixture = process.env.FIXTURE;
+const trace = process.env.TRACE;
+const payload = JSON.stringify({ tool_name: "Bash", tool_input: { command: "printf x > projects/foo/adapter-sentinel" } });
+const adapters = [
+  {
+    name: "Claude",
+    file: ".claude/settings.json",
+    env: { CLAUDE_PROJECT_DIR: fixture },
+    commands: (config) => config.hooks.PreToolUse.filter((event) => event.matcher === ".*").flatMap((event) => event.hooks.map((hook) => hook.command)),
+  },
+  {
+    name: "Codex",
+    file: ".codex/hooks.json",
+    env: {},
+    commands: (config) => config.hooks.PreToolUse.filter((event) => event.matcher === ".*").flatMap((event) => event.hooks.map((hook) => hook.command)),
+  },
+  {
+    name: "Cursor",
+    file: ".cursor/hooks.json",
+    env: { CURSOR_PROJECT_DIR: fixture },
+    commands: (config) => config.hooks.preToolUse.filter((event) => event.matcher === ".*").map((event) => event.command),
+  },
+  {
+    name: "Grok",
+    file: ".grok/hooks/fm-primary-project-write-check.json",
+    env: { GROK_WORKSPACE_ROOT: fixture },
+    commands: (config) => config.hooks.PreToolUse.filter((event) => event.matcher === ".*").flatMap((event) => event.hooks.map((hook) => hook.command)),
+  },
+];
+const traceCount = () => existsSync(trace) ? readFileSync(trace, "utf8").trim().split("\n").filter(Boolean).length : 0;
+for (const adapter of adapters) {
+  const config = JSON.parse(readFileSync(join(fixture, adapter.file), "utf8"));
+  const commands = adapter.commands(config);
+  if (!commands.length) throw new Error(`${adapter.name} has no all-tool hook commands`);
+  let invokedAndDenied = false;
+  for (const command of commands) {
+    const before = traceCount();
+    const env = { ...process.env, FM_HOME: fixture, FM_STATE_OVERRIDE: join(fixture, "state"), FM_PROJECT_WRITE_ADAPTER_TRACE: trace, ...adapter.env };
+    delete env.GROK_AGENT;
+    delete env.GROK_HOOK_EVENT;
+    delete env.FM_ROOT_OVERRIDE;
+    const result = spawnSync("bash", ["-c", command], { cwd: fixture, env, input: payload, encoding: "utf8" });
+    const invoked = traceCount() > before;
+    const output = `${result.stdout || ""}\n${result.stderr || ""}`;
+    let denied = result.status === 2 && output.includes("[project-write]");
+    if (adapter.name === "Cursor" && result.status === 0) {
+      try {
+        const decision = JSON.parse(result.stdout);
+        denied = decision.permission === "deny" && String(decision.user_message).includes("[project-write]");
+      } catch {}
+    }
+    if (invoked && denied) invokedAndDenied = true;
+  }
+  if (!invokedAndDenied) throw new Error(`${adapter.name} configured hook did not invoke the checker and deny the protected operation`);
+}
+if (existsSync(join(fixture, "projects/foo/adapter-sentinel"))) throw new Error("a configured hook allowed the protected write");
+NODE
+  ); rc=$?
+  [ "$rc" -eq 0 ] || fail "configured adapters did not execute and enforce the project-write hook: $out"
+  [ -z "$out" ] || fail "adapter behavior check printed output: $out"
+  pass "project-write guard: Claude, Codex, Cursor, and Grok commands invoke the checker and deny writes"
 
   plugin="$TMP_ROOT/fm-primary-project-write-check.mjs"
   cp "$ROOT/.opencode/plugins/fm-primary-project-write-check.js" "$plugin"

@@ -11,6 +11,7 @@ import {
   existsSync,
   readFileSync,
   readdirSync,
+  statSync,
   realpathSync,
 } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -271,6 +272,28 @@ function gitTargetedMutation(position, cwd, roots) {
     const output = value === "--output" ? target.args[index + 1] : value.startsWith("--output=") ? { type: "word", value: value.slice("--output=".length) } : null;
     if (output && (target.targeted || pathFromWord(output, cwd, roots))) return `git ${target.subcommand} output`;
   }
+  if (target.subcommand === "archive") {
+    for (let index = 0; index < target.args.length; index += 1) {
+      const value = target.args[index].value;
+      const output = value === "-o" ? target.args[index + 1]
+        : value.startsWith("-o") && value.length > 2 ? { type: "word", value: value.slice(2).replace(/^=/, "") }
+          : null;
+      if (output && pathFromWord(output, cwd, roots)) return "git archive output";
+    }
+  }
+  if (target.subcommand === "checkout-index") {
+    for (let index = 0; index < target.args.length; index += 1) {
+      const value = target.args[index].value;
+      const prefix = value === "--prefix" ? target.args[index + 1]
+        : value.startsWith("--prefix=") ? { type: "word", value: value.slice("--prefix=".length) }
+          : null;
+      if (prefix && pathFromWord(prefix, cwd, roots)) return "git checkout-index output";
+    }
+  }
+  if (target.subcommand === "bundle" && target.args[0]?.value === "create") {
+    const operands = optionsAndOperands(target.args, 1);
+    if (operands.length > 0 && pathFromWord(operands[0], cwd, roots)) return "git bundle create";
+  }
   if (!target.targeted || gitIsReadOnly(target.subcommand, target.args)) return "";
   return `git ${target.subcommand}`;
 }
@@ -278,9 +301,9 @@ function gitTargetedMutation(position, cwd, roots) {
 function redirectedTargets(tokens, cwd, roots) {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index];
-    if (token.type !== "redir" || ![">", ">>", "<>"].includes(token.value)) continue;
+    if (token.type !== "redir" || ![">", ">>", "<>", "&>", "&>>", ">|"].includes(token.value)) continue;
     const target = token.inlineTarget ? null : tokens[index + 1];
-    if (pathFromWord(target, cwd, roots)) return token.value === ">>" ? "append redirection" : "file redirection";
+    if (pathFromWord(target, cwd, roots)) return [">>", "&>>"].includes(token.value) ? "append redirection" : "file redirection";
   }
   return "";
 }
@@ -296,7 +319,7 @@ function sedTargets(position, cwd, roots) {
       index += 1;
       break;
     }
-    if (option === "-i" || /^-i.+/.test(option) || option.startsWith("--in-place")) inPlace = true;
+    if (/^-[A-Za-z]*i/.test(option) || option.startsWith("--in-place")) inPlace = true;
     if (["-e", "-f"].includes(option)) {
       hasScript = true;
       index += 1;
@@ -337,6 +360,106 @@ function findExecMutation(args, cwd, roots) {
   return "";
 }
 
+function patchStripCount(args) {
+  let count = 0;
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index].value;
+    if (value === "-p") {
+      const next = args[index + 1]?.value;
+      if (!/^\d+$/.test(next || "")) return null;
+      count = Number(next);
+      index += 1;
+    } else if (/^-p\d+$/.test(value)) {
+      count = Number(value.slice(2));
+    }
+  }
+  return count;
+}
+
+function patchHeaderPaths(content) {
+  const paths = [];
+  const add = (value) => {
+    const candidate = value.trim().split(/[\t ]/)[0];
+    if (!candidate) return false;
+    if (candidate.startsWith('"')) return false;
+    if (candidate !== "/dev/null") paths.push(candidate);
+    return true;
+  };
+  for (const line of content.split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      const match = line.slice("diff --git ".length).match(/^(\S+)\s+(\S+)$/);
+      if (!match || !add(match[1]) || !add(match[2])) return null;
+      continue;
+    }
+    const header = line.match(/^(?:---|\+\+\+|\*{3}|Index:)\s+(.+)$/);
+    if (header && !add(header[1])) return null;
+  }
+  return paths.length > 0 ? paths : null;
+}
+
+function readPatchInputs(args, tokens, cwd) {
+  const sources = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const value = args[index].value;
+    if (["-i", "--input"].includes(value)) {
+      if (!args[index + 1]) return null;
+      sources.push({ file: args[index + 1].value });
+      index += 1;
+    } else if (value.startsWith("--input=")) {
+      sources.push({ file: value.slice("--input=".length) });
+    } else if (value.startsWith("-i") && value.length > 2) {
+      sources.push({ file: value.slice(2) });
+    }
+  }
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index];
+    if (token.type !== "redir") continue;
+    if (["<<", "<<-"].includes(token.value)) {
+      sources.push({ content: token.heredoc });
+    } else if (token.value === "<<<") {
+      const word = tokens[index + 1];
+      sources.push(word?.literal ? { content: word.value } : {});
+    } else if (token.value === "<") {
+      const word = token.inlineTarget ? null : tokens[index + 1];
+      sources.push(word?.type === "word" ? { file: word.value } : {});
+    }
+  }
+  if (sources.length === 0) return [];
+  const contents = [];
+  for (const source of sources) {
+    if (typeof source.content === "string") {
+      contents.push(source.content);
+      continue;
+    }
+    if (typeof source.file !== "string" || !source.file || source.file === "-") return null;
+    const file = normalizeAbsolute(source.file, cwd);
+    try {
+      if (!statSync(file).isFile()) return null;
+      contents.push(readFileSync(file, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+  return contents;
+}
+
+function patchTargetsProtectedPath(args, tokens, cwd, roots, hasExplicitTarget) {
+  const stripCount = patchStripCount(args);
+  if (stripCount === null) return true;
+  const inputs = readPatchInputs(args, tokens, cwd);
+  if (inputs === null) return true;
+  if (inputs.length === 0) return !hasExplicitTarget;
+  for (const input of inputs) {
+    const paths = patchHeaderPaths(input);
+    if (!paths) return true;
+    for (const value of paths) {
+      const components = value.split("/").slice(stripCount);
+      if (components.length > 0 && protectedPath(components.join("/"), cwd, roots)) return true;
+    }
+  }
+  return false;
+}
+
 function commandTargetedMutation(position, tokens, cwd, roots) {
   const command = path.basename(position.command?.value || "");
   if (!command) return "";
@@ -351,7 +474,7 @@ function commandTargetedMutation(position, tokens, cwd, roots) {
   if (redirection) return redirection;
 
   if (command === "sed") return sedTargets(position, cwd, roots);
-  if (command === "perl" && args.some((word) => /^-i/.test(word.value))) {
+  if (command === "perl" && args.some((word) => /^-[^-]*i/.test(word.value))) {
     return args.some((word) => pathFromWord(word, cwd, roots)) ? "perl -i" : "";
   }
 
@@ -368,11 +491,11 @@ function commandTargetedMutation(position, tokens, cwd, roots) {
       ? { type: "word", value: directoryEquals.value.slice("--directory=".length) }
       : directoryOption ? args[args.indexOf(directoryOption) + 1] : null;
     if (pathFromWord(directory, cwd, roots)) return "patch";
-    if (args.some((word) => word.value.startsWith("-o") && word.value.length > 2 && pathFromWord({ type: "word", value: word.value.slice(2) }, cwd, roots))) return "patch";
+    if (args.some((word) => word.value.startsWith("-o") && word.value.length > 2 && pathFromWord({ type: "word", value: word.value.slice(2).replace(/^=/, "") }, cwd, roots))) return "patch";
     if (args.some((word, index) => word.value === "-o" && pathFromWord(args[index + 1], cwd, roots))) return "patch";
     const operands = optionsAndOperands(words, start, new Set(["-i", "--input", "-o", "-d", "--directory"]));
     if (operands.some((word) => pathFromWord(word, cwd, roots))) return "patch";
-    return "";
+    return patchTargetsProtectedPath(args, tokens, cwd, roots, operands.length > 0) ? "patch" : "";
   }
 
   const targets = new Set(["rm", "mv", "cp", "tee", "mkdir", "rmdir", "touch", "truncate", "chmod", "chown", "ln", "install"]);

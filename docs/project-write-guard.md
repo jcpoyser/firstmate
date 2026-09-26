@@ -19,7 +19,7 @@ The guard blocks state-changing Git commands aimed at a protected path, includin
 Unknown Git subcommands aimed at a protected path are blocked unless they are explicitly classified as read-only.
 Read-only commands including status, log, diff, show, and rev-parse remain allowed, including with `git -C <dir>`.
 
-The guard also blocks shell file changes aimed at protected paths, including rm, mv, cp into a protected path, output redirection, tee, sed -i, `patch`, `dd of=`, and `find` deletion or write-bearing `-exec`/`-execdir` actions. It resolves simple prior shell assignments when checking file destinations and Git routing.
+The guard also blocks shell file changes aimed at protected paths, including rm, mv, cp into a protected path, output redirection (including `&>` and `>|`), tee, combined in-place `sed`/`perl` options, `patch` diffs whose target headers are protected (or cannot be inspected), `dd of=`, and `find` deletion or write-bearing `-exec`/`-execdir` actions. It resolves simple prior shell assignments when checking file destinations and Git routing. Git archive, checkout-index, and bundle file destinations are checked as well.
 Native file-write and file-edit tools are blocked when their target path is protected.
 Guarded Firstmate scripts under `bin/` remain callable because this policy classifies the submitted tool command and never inspects script internals.
 
@@ -49,6 +49,6 @@ node --check bin/fm-arm-command-policy.mjs
 tests/fm-project-write-pretool-check.test.sh
 ```
 
-The portable test proves the policy and all adapter payload/configuration shapes without launching a vendor harness.
+The portable test proves policy behavior and executes the configured all-tool commands for Claude, Codex, Cursor, and Grok, alongside OpenCode plugin behavior, without launching vendor harnesses.
 The prompt-submitting real-harness guard is opt-in and runs with `FM_PROJECT_WRITE_LIVE_E2E=1 bin/fm-test-run.sh tests/fm-project-write-pretool-check.test.sh tests/fm-project-write-live-e2e.test.sh`; it records disposable-fixture checker inputs and results, then requires the requested operation and an actual checker denial rather than model-written prose.
 The dated Claude, Codex, and Pi results, along with adapters not installed during verification, are recorded in [`docs/verification/runtime-backends.md`](verification/runtime-backends.md#primary-project-write-pretooluse-guard).
