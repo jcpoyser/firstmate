@@ -114,8 +114,8 @@ setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
   printf '%s\n' "$home"
 }
 
-setup_captain_answer() {  # <home> <task-id> <answer>
-  local home=$1 id=$2 answer=$3 backlog="$1/data/backlog.md" decision="$1/data/decision.txt"
+setup_captain_hold() {  # <home> <task-id>
+  local home=$1 id=$2 backlog="$1/data/backlog.md"
   mkdir -p "$home/data" "$home/config"
   if [ ! -f "$home/.tasks.toml" ]; then
     cat > "$home/.tasks.toml" <<'EOF'
@@ -137,6 +137,11 @@ EOF
   FM_TASKS_AXI_COMPATIBLE=1 tasks-axi add "$id" "Captain decision for $id" --kind captain --file "$backlog" >/dev/null
   FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CAPTAIN_HOLD" hold "$id" \
     --reason "captain decision required" >/dev/null
+}
+
+setup_captain_answer() {  # <home> <task-id> <answer>
+  local home=$1 id=$2 answer=$3 decision="$1/data/decision.txt"
+  setup_captain_hold "$home" "$id"
   printf '%s\n' "$answer" > "$decision"
   FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" "$CAPTAIN_HOLD" answer "$id" \
     --decision-file "$decision" >/dev/null
@@ -341,6 +346,75 @@ test_multiple_needs_decisions_require_distinct_recorded_answers() {
     | grep -qF 'resolved [key=nm-b]: answered: Approve both findings.' \
     || fail "the second separately authorized decision was not closed"
   pass "fm-send requires a distinct recorded captain answer for every needs-decision key"
+}
+
+test_transferred_held_decision_requires_its_recorded_answer() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; transferred-decision enforcement needs its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/transferred-captain-decision"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home transferred-captain-decision)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/th1.meta" "window=sess:fm-th1" "kind=ship"
+  printf 'needs-decision [key=transferred-choice]: choose a route\n' > "$home/state/th1.status"
+  setup_captain_hold "$home" transferred-choice
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" complete th1 transferred-choice >/dev/null
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" th1 'approve this finding' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unmarked steer bypassed a transferred captain-held decision"
+  assert_contains "$(cat "$err")" "open decision key(s) 'transferred-choice'" \
+    "the transferred hold refusal should name its decision key"
+  [ ! -e "$home/state/th1.inbox/001.msg" ] || fail "an unmarked steer reached the worker despite a transferred hold"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" sess:fm-th1 'approve this finding' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an explicit endpoint bypassed a transferred captain-held decision"
+  [ ! -s "$log" ] || fail "the explicit-endpoint steer bypassed a transferred hold"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" th1 --no-decision 'routine progress update' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -eq 0 ] || fail "--no-decision should permit a non-answering steer for a transferred hold: $(cat "$err")"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/th1.status" \
+    | grep -qF 'note: decision-declaration: no-decision' \
+    || fail "the transferred-hold no-decision declaration was not logged"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" th1 --resolve-key transferred-choice \
+    'use the north route' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a transferred hold was answered without a recorded captain answer"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer for this decision" \
+    "the transferred hold should require its captain record"
+  [ ! -e "$home/state/th1.inbox/002.msg" ] || fail "an unrecorded held answer reached the worker"
+
+  setup_captain_answer "$home" unrelated-choice 'Choose the west route.'
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" th1 --resolve-key transferred-choice \
+    --captain-answer unrelated-choice 'use the north route' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrelated captain answer authorized the transferred hold"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer for this decision" \
+    "the held decision should reject another task's answer record"
+  [ ! -e "$home/state/th1.inbox/002.msg" ] || fail "an unrelated held answer reached the worker"
+
+  printf '%s\n' 'Use the north route.' > "$home/data/transferred-answer.txt"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" answer transferred-choice --decision-file "$home/data/transferred-answer.txt" >/dev/null
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" th1 --resolve-key transferred-choice \
+    --captain-answer transferred-choice 'use the north route' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the held decision should relay after its own answer is recorded"
+  grep -qF 'use the north route' "$home/state/th1.inbox/002.msg" \
+    || fail "the captain-authorized held answer did not reach the worker"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/th1.status" \
+    | grep -qF 'note: decision-declaration: answered-key=transferred-choice' \
+    || fail "the held-answer declaration was not logged"
+  pass "fm-send gates transferred holds on their own recorded captain answer"
 }
 
 test_answer_send_closes_open_decision() {
@@ -1138,6 +1212,7 @@ test_remote_captain_decision_guard_runs_before_transport
 test_decision_declaration_is_structural_and_logged
 test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
+test_transferred_held_decision_requires_its_recorded_answer
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake

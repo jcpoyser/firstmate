@@ -130,7 +130,7 @@ While tasks are in flight, dispatch shared-repo edits to a crewmate.
 
 ## Captain decision enforcement (config/captain-decides-findings)
 
-The optional local, gitignored `config/captain-decides-findings` presence flag requires an explicit decision declaration when a task has an open `needs-decision` key. Use `--resolve-key <key>` for each decision this send answers, paired with that decision's recorded answer via `--captain-answer <task-id>`, or use `--no-decision` when the send answers none. The declaration is recorded in the task status; `--no-decision` cannot accompany a resolved `needs-decision` key, but can accompany unrelated `blocked`-key resolution.
+The optional local, gitignored `config/captain-decides-findings` presence flag requires an explicit decision declaration when a task has an open `needs-decision` key or an unresolved captain-held inventory decision. Use `--resolve-key <key>` for each decision this send answers, paired with that decision's recorded answer via `--captain-answer <task-id>`, or use `--no-decision` when the send answers none. The declaration is recorded in the task status; `--no-decision` cannot accompany a resolved `needs-decision` or captain-held key, but can accompany unrelated `blocked`-key resolution.
 
 A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity. `bin/fm-captain-hold.sh answer-recorded` checks that a current answer record exists before delivery. This is a firstmate attestation, not proof that the captain authored the answer. The existing record store retains who wrote the record and when.
 
