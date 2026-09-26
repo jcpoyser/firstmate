@@ -31,6 +31,7 @@
 #   fm-captain-hold.sh complete <origin-id> (--none | <task-id>...)
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
+#   fm-captain-hold.sh answer-recorded <task-id>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -157,6 +158,12 @@
 # a single row still held for the captain; two such rows refuse rather than
 # attest, and `complete` names each prefix-resolved row beside its attested
 # legacy id so the guess stays auditable.
+#
+# `answer-recorded` is the read-only predicate for a completed captain answer.
+# It succeeds only when the task body carries a current `answer`, `answer
+# --release`, or repaired answer record from this lifecycle, with no active hold
+# stamp left in front of it. An old answer beneath a re-held task's new stamp is
+# not evidence for the current call.
 #
 # `open` is the read-only predicate a mechanical closer asks before it may
 # retire a task's row: is this task still an open captain call? Exit 0 means it
@@ -1851,6 +1858,25 @@ EOF
   done
 }
 
+# Has this captain-held task recorded an answer in the current hold lifecycle?
+command_answer_recorded() {  # <task-id>
+  local id=${1:-} show body decoded mode
+  [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+  validate_slug task-id "$id"
+  require_tasks_axi
+  task_show "$id" || return $?
+  show=$TASK_SHOW_OUTPUT
+  body=$(show_field "$show" body)
+  decoded=$(decode_shown_value "$body") || fail "could not decode the captain-held task body for $id"
+  [ -z "$(body_hold_set_timestamp "$decoded")" ] || return 1
+  body_has_resolution_record "$body" || return 1
+  mode=$(recorded_resolution_mode "$body" || true)
+  case "$mode" in
+    answered|released|repaired) printf 'recorded: %s\n' "$id" ;;
+    *) return 1 ;;
+  esac
+}
+
 # Still an open captain call? Exit 0 yes, 1 no, 2 cannot tell (see the header).
 # A row this home does not carry is 3 when the caller requests the distinction,
 # and so is a home with no backlog file at all, because a backlog that does not
@@ -1934,6 +1960,7 @@ case "${1:-}" in
   complete) shift; command_complete "$@" ;;
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
+  answer-recorded) shift; command_answer_recorded "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
