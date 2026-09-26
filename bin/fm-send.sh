@@ -207,9 +207,10 @@
 # refused with --key, with an explicit backend target (no task ledger in this
 # home), and with an empty message.
 #
-# When config/captain-decides-findings is present and the task has open
-# needs-decision keys, each answer must name its key with --resolve-key and its
-# matching --captain-answer <task-id>; a send answering none must use
+# When config/captain-decides-findings is present and the task has an open
+# needs-decision key or unresolved captain-held inventory decision, each answer
+# must name its key with --resolve-key and matching --captain-answer
+# <task-id>; a send answering none must use
 # --no-decision. Answered keys and no-decision declarations are recorded in
 # the task status. The answer-record check is a firstmate attestation, not
 # proof of captain authorship. These checks apply to task metadata reached
@@ -605,10 +606,13 @@ RESOLVE_STATUS_FILE=
 CAPTAIN_POLICY_STATUS_FILE=
 CAPTAIN_POLICY_OPEN_SET=
 CAPTAIN_OPEN_NEEDS_KEYS=
+CAPTAIN_POLICY_TASK_ID=
+CAPTAIN_POLICY_INVENTORY=
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_META" ]; then
   CAPTAIN_POLICY_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   CAPTAIN_POLICY_STATUS_FILE="$STATE/$CAPTAIN_POLICY_TASK_ID.status"
   CAPTAIN_POLICY_OPEN_SET=$(status_open_decisions "$CAPTAIN_POLICY_STATUS_FILE")
+  CAPTAIN_POLICY_INVENTORY=$(fm_meta_get "$TARGET_META" decision_keys)
   while IFS=$'\t' read -r policy_key policy_verb _policy_summary; do
     [ "$policy_verb" = needs-decision ] || continue
     CAPTAIN_OPEN_NEEDS_KEYS="${CAPTAIN_OPEN_NEEDS_KEYS}${CAPTAIN_OPEN_NEEDS_KEYS:+ }$policy_key"
@@ -616,13 +620,14 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_META" ]; then
 $CAPTAIN_POLICY_OPEN_SET
 EOF
 fi
+CAPTAIN_OPEN_HELD_KEYS=
+CAPTAIN_OPEN_DECISION_KEYS=
 RESOLVE_DECISION_KEYS=
 # Which ledger each answered key belongs to. A key still open in the status log
 # is owned by the status log: fm-captain-hold's `complete` closes that live copy
 # at the moment it transfers a decision to its durable captain-held task, so
 # "still open in status" and "already held" are the two sides of one transfer,
-# never both at once. Checking the backlog only for keys the status log no
-# longer owns also keeps the common path free of any backlog read.
+# never both at once.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
 RESOLVE_PREANSWERED_HOLD_KEYS=
@@ -635,19 +640,54 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 # means not closed and still carrying the captain-hold annotations tasks-axi
 # preserves even past a hold-until date.
 fm_send_hold_resolved_id() { # <task-id> <decision-key>
-  local show id state hold_kind
-  command -v tasks-axi >/dev/null 2>&1 || return 1
+  local show id state hold_kind rc
   for id in "$2" "$1-decision-$2"; do
-    show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
-    state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
-    hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
-    [ "$state" != "done" ] || continue
-    [ "$hold_kind" = captain ] || continue
-    printf '%s\n' "$id"
-    return 0
+    if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
+      if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+        "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" >/dev/null 2>&1; then
+        printf '%s\n' "$id"
+        return 0
+      else
+        rc=$?
+        [ "$rc" -eq 1 ] || return "$rc"
+      fi
+    else
+      command -v tasks-axi >/dev/null 2>&1 || return 1
+      show=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE='' "$SCRIPT_DIR/fm-tasks-axi.sh" show "$id" --full 2>/dev/null) || continue
+      state=$(printf '%s\n' "$show" | sed -n 's/^  state: //p' | head -1)
+      hold_kind=$(printf '%s\n' "$show" | sed -n 's/^  hold_kind: //p' | head -1)
+      [ "$state" != "done" ] || continue
+      [ "$hold_kind" = captain ] || continue
+      printf '%s\n' "$id"
+      return 0
+    fi
   done
   return 1
 }
+
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; then
+  local_inventory_keys=()
+  IFS=, read -r -a local_inventory_keys <<< "$CAPTAIN_POLICY_INVENTORY"
+  for inventory_key in "${local_inventory_keys[@]}"; do
+    case "$inventory_key" in
+      ''|*[!A-Za-z0-9._-]*)
+        echo "error: invalid decision_keys inventory in $TARGET_META; refusing to send" >&2
+        exit 1
+        ;;
+    esac
+    held_rc=0
+    fm_send_hold_resolved_id "$CAPTAIN_POLICY_TASK_ID" "$inventory_key" >/dev/null || held_rc=$?
+    case "$held_rc" in
+      0) CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$inventory_key" ;;
+      1) : ;;
+      *) echo "error: cannot verify captain-held decision '$inventory_key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
+    esac
+  done
+fi
+CAPTAIN_OPEN_DECISION_KEYS=$CAPTAIN_OPEN_NEEDS_KEYS
+if [ -n "$CAPTAIN_OPEN_HELD_KEYS" ]; then
+  CAPTAIN_OPEN_DECISION_KEYS="${CAPTAIN_OPEN_DECISION_KEYS}${CAPTAIN_OPEN_DECISION_KEYS:+ }$CAPTAIN_OPEN_HELD_KEYS"
+fi
 
 FM_SEND_MATCHED_CAPTAIN_ANSWER=
 fm_send_captain_answer_recorded() { # <task-id>
@@ -826,8 +866,8 @@ fi
 
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
   if [ "$NO_DECISION" = 1 ]; then
-    [ -n "$CAPTAIN_OPEN_NEEDS_KEYS" ] || {
-      echo "error: --no-decision requires an open needs-decision key; nothing was sent" >&2
+    [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ] || {
+      echo "error: --no-decision requires an open decision; nothing was sent" >&2
       exit 1
     }
     [ -z "$RESOLVE_HOLD_KEYS" ] || {
@@ -840,9 +880,9 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
         exit 1
       }
     done
-  elif [ -n "$CAPTAIN_OPEN_NEEDS_KEYS" ]; then
+  elif [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ]; then
     [ -n "$RESOLVE_DECISION_KEYS" ] || {
-      echo "error: open needs-decision key(s) '$CAPTAIN_OPEN_NEEDS_KEYS' require matching --resolve-key and --captain-answer declarations, or --no-decision; nothing was sent" >&2
+      echo "error: open decision key(s) '$CAPTAIN_OPEN_DECISION_KEYS' require matching --resolve-key and --captain-answer declarations, or --no-decision; nothing was sent" >&2
       exit 1
     }
   fi
@@ -852,7 +892,7 @@ fm_send_log_captain_declaration() {
   local append_rc=0 key
   local -a declaration_lines=()
   [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && {
-    [ -n "$CAPTAIN_OPEN_NEEDS_KEYS" ] || [ -n "$RESOLVE_DECISION_KEYS" ]
+    [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ] || [ -n "$RESOLVE_DECISION_KEYS" ]
   } || return 0
   if [ "$NO_DECISION" = 1 ]; then
     declaration_lines+=("note: decision-declaration: no-decision")
