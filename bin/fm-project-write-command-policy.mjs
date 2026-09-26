@@ -3,11 +3,11 @@
 //
 // The shell lexer and command-position analysis are shared with the arm and cd
 // guards. This policy adds target-path and file-tool decisions without parsing
-// shell syntax independently.
+// shell syntax independently. It is an accidental-write guard, not a security
+// boundary; command-text analysis cannot identify every possible write.
 
 import path from "node:path";
 import {
-  appendFileSync,
   existsSync,
   readFileSync,
   readdirSync,
@@ -21,9 +21,8 @@ function denialReason(action) {
   const alternative = ["git fetch", "git pull"].includes(detail)
     ? "read GitHub instead of fetching"
     : "delegate the change to a worker";
-  return `${detail} targeting a project clone or worker copy is blocked; ${alternative}. A concrete captain-approved operation may use the one-command approval form documented in docs/project-write-guard.md.`;
+  return `${detail} targeting a project clone or worker copy is blocked; ${alternative}.`;
 }
-const APPROVAL_PREFIX = "Captain explicitly approved: ";
 const READ_ONLY_GIT = new Set([
   "status", "log", "diff", "show", "rev-parse", "ls-files", "ls-tree",
   "grep", "cat-file", "blame", "shortlog", "describe", "check-attr",
@@ -115,6 +114,30 @@ function pathFromWord(word, cwd, roots) {
   return word && word.type === "word" && protectedPath(word.value, cwd, roots);
 }
 
+function expandStaticWord(word, variables) {
+  if (!word || word.type !== "word" || word.literal) return word;
+  let resolved = word.subs.length === 0;
+  const value = word.value.replace(/\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g, (match, braced, plain) => {
+    const name = braced || plain;
+    if (!variables.has(name)) {
+      resolved = false;
+      return match;
+    }
+    return variables.get(name);
+  });
+  if (value.includes("$") && !/\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/.test(value)) resolved = false;
+  return { ...word, value, resolved };
+}
+
+function applyAssignments(words, start, end, variables) {
+  for (const word of words.slice(start, end)) {
+    const match = word.value.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/s);
+    if (!match) continue;
+    if (word.literal || word.resolved !== false) variables.set(match[1], match[2]);
+    else variables.delete(match[1]);
+  }
+}
+
 function optionsAndOperands(words, start, takesValue = new Set()) {
   const operands = [];
   let options = true;
@@ -135,6 +158,13 @@ function optionsAndOperands(words, start, takesValue = new Set()) {
 
 function gitInvocation(position, cwd, roots) {
   const args = position.words.slice(position.index + 1);
+  const environment = new Map(Object.entries(process.env));
+  applyAssignments(position.words, 0, position.index, environment);
+  const routedPaths = [];
+  for (const name of ["GIT_DIR", "GIT_WORK_TREE"]) {
+    const value = environment.get(name);
+    if (value) routedPaths.push(normalizeAbsolute(value, cwd));
+  }
   let target = cwd;
   let subcommandIndex = 0;
   for (; subcommandIndex < args.length; subcommandIndex += 1) {
@@ -143,8 +173,11 @@ function gitInvocation(position, cwd, roots) {
       const operand = args[subcommandIndex + 1];
       if (!operand) break;
       const resolved = normalizeAbsolute(operand.value, target);
-      if (value === "-C") target = resolved;
-      else if (protectedPath(operand.value, target, roots)) target = resolved;
+      if (value === "-C") {
+        target = resolved;
+      } else {
+        routedPaths.push(resolved);
+      }
       subcommandIndex += 1;
       continue;
     }
@@ -154,7 +187,7 @@ function gitInvocation(position, cwd, roots) {
     }
     if (value.startsWith("--git-dir=") || value.startsWith("--work-tree=")) {
       const operand = value.slice(value.indexOf("=") + 1);
-      if (protectedPath(operand, target, roots)) target = normalizeAbsolute(operand, target);
+      routedPaths.push(normalizeAbsolute(operand, target));
       continue;
     }
     if (value === "-c" || value === "--config-env") {
@@ -166,7 +199,7 @@ function gitInvocation(position, cwd, roots) {
   }
   const subcommand = args[subcommandIndex]?.value || "";
   return {
-    targeted: protectedPath(target, cwd, roots),
+    targeted: routedPaths.some((value) => protectedPath(value, cwd, roots)) || protectedPath(target, cwd, roots),
     subcommand,
     args: args.slice(subcommandIndex + 1),
   };
@@ -201,6 +234,17 @@ function gitTargetedMutation(position, cwd, roots) {
     "--jobs", "--reference", "--reference-if-able", "--separate-git-dir", "--shallow-since",
     "--shallow-exclude", "--server-option", "--template", "--upload-pack", "-j",
   ]);
+  if (["clone", "init"].includes(target.subcommand)) {
+    for (let index = 0; index < target.args.length; index += 1) {
+      const value = target.args[index].value;
+      if (value === "--separate-git-dir" && target.args[index + 1] && pathFromWord(target.args[index + 1], cwd, roots)) {
+        return `git ${target.subcommand}`;
+      }
+      if (value.startsWith("--separate-git-dir=") && pathFromWord({ type: "word", value: value.slice("--separate-git-dir=".length) }, cwd, roots)) {
+        return `git ${target.subcommand}`;
+      }
+    }
+  }
   if (target.subcommand === "clone") {
     const operands = optionsAndOperands(target.args, 0, cloneOptions);
     if (operands.length > 1 && pathFromWord(operands.at(-1), cwd, roots)) return "git clone";
@@ -264,6 +308,35 @@ function sedTargets(position, cwd, roots) {
   return words.slice(index).some((word) => pathFromWord(word, cwd, roots)) ? "sed -i" : "";
 }
 
+function findExecMutation(args, cwd, roots) {
+  const mutators = new Set(["rm", "mv", "cp", "tee", "mkdir", "rmdir", "touch", "truncate", "chmod", "chown", "ln", "install", "patch", "dd"]);
+  let searchRootProtected = false;
+  let hasSearchRoot = false;
+  for (const word of args) {
+    if (word.value.startsWith("-") || ["!", "("].includes(word.value)) break;
+    hasSearchRoot = true;
+    searchRootProtected ||= pathFromWord(word, cwd, roots);
+  }
+  if (!hasSearchRoot) searchRootProtected = protectedPath(".", cwd, roots);
+  if (args.some((word) => word.value === "-delete") && searchRootProtected) return "find -delete";
+
+  for (let index = 0; index < args.length; index += 1) {
+    if (!["-exec", "-execdir"].includes(args[index].value)) continue;
+    const action = [];
+    for (let cursor = index + 1; cursor < args.length && !["+", ";"].includes(args[cursor].value); cursor += 1) action.push(args[cursor]);
+    const actionPosition = commandPosition(action);
+    const actionName = path.basename(actionPosition.command?.value || "");
+    const targetedArgument = action.some((word) => pathFromWord(word, cwd, roots) ||
+      (word.value.startsWith("of=") && protectedPath(word.value.slice(3), cwd, roots)));
+    const shellWrite = ["sh", "bash", "zsh"].includes(actionName) && action.some((word) =>
+      /(?:^|\s)(?:>|>>|<>|\b(?:rm|mv|cp|tee|touch|truncate|patch|dd)\b)/.test(word.value));
+    if ((searchRootProtected && mutators.has(actionName)) || targetedArgument && mutators.has(actionName) || shellWrite) {
+      return `find ${args[index].value}`;
+    }
+  }
+  return "";
+}
+
 function commandTargetedMutation(position, tokens, cwd, roots) {
   const command = path.basename(position.command?.value || "");
   if (!command) return "";
@@ -282,8 +355,23 @@ function commandTargetedMutation(position, tokens, cwd, roots) {
     return args.some((word) => pathFromWord(word, cwd, roots)) ? "perl -i" : "";
   }
 
-  if (command === "find") {
-    if (args.some((word) => word.value === "-delete") && args.some((word) => pathFromWord(word, cwd, roots))) return "find -delete";
+  if (command === "find") return findExecMutation(args, cwd, roots);
+
+  if (command === "dd") {
+    return args.some((word) => word.value.startsWith("of=") && protectedPath(word.value.slice(3), cwd, roots)) ? "dd" : "";
+  }
+  if (command === "patch") {
+    if (protectedPath(".", cwd, roots)) return "patch";
+    const directoryOption = args.find((word) => word.value === "-d" || word.value === "--directory");
+    const directoryEquals = args.find((word) => word.value.startsWith("--directory="));
+    const directory = directoryEquals
+      ? { type: "word", value: directoryEquals.value.slice("--directory=".length) }
+      : directoryOption ? args[args.indexOf(directoryOption) + 1] : null;
+    if (pathFromWord(directory, cwd, roots)) return "patch";
+    if (args.some((word) => word.value.startsWith("-o") && word.value.length > 2 && pathFromWord({ type: "word", value: word.value.slice(2) }, cwd, roots))) return "patch";
+    if (args.some((word, index) => word.value === "-o" && pathFromWord(args[index + 1], cwd, roots))) return "patch";
+    const operands = optionsAndOperands(words, start, new Set(["-i", "--input", "-o", "-d", "--directory"]));
+    if (operands.some((word) => pathFromWord(word, cwd, roots))) return "patch";
     return "";
   }
 
@@ -309,47 +397,26 @@ function commandTargetedMutation(position, tokens, cwd, roots) {
   return pathOperands.some((word) => pathFromWord(word, cwd, roots)) ? command : "";
 }
 
-function approvalFor(node, position, tokens, command) {
-  if (tokens.some((token) => token.type === "redir" || token.type === "group")) return "";
-  if (position.prefixAssignments !== 1 || position.wrappers.length > 0 || position.unresolvedWrapperOption) return "";
-  if (position.words.some((word) => word.subs.length > 0 || !word.literal)) return "";
-  const approvalAssignment = position.words.slice(0, position.prefixAssignments)
-    .map((word) => word.value)
-    .find((value) => value.startsWith("FM_PROJECT_WRITE_APPROVAL="));
-  if (!approvalAssignment) return "";
-  const statement = approvalAssignment.slice("FM_PROJECT_WRITE_APPROVAL=".length);
-  const operation = position.words.slice(position.index).map((word) => word.value).join(" ");
-  if (!statement.startsWith(APPROVAL_PREFIX) || statement.slice(APPROVAL_PREFIX.length) !== operation) return "";
-  if (command !== operation) return "";
-  return statement;
-}
-
-function analyzeProgram(source, context, cwd, roots, depth = 0) {
-  if (depth > 12) return { denied: "", approval: "" };
+function analyzeProgram(source, context, cwd, roots, depth = 0, inheritedVariables = new Map(Object.entries(process.env))) {
+  if (depth > 12) return { denied: "" };
   const lexed = new Lexer(source).tokenize();
-  if (lexed.error) return { denied: "", approval: "" };
-  const { nodes, separators } = splitProgram(lexed.tokens);
+  if (lexed.error) return { denied: "" };
+  const { nodes } = splitProgram(lexed.tokens);
+  const variables = new Map(inheritedVariables);
   for (let index = 0; index < nodes.length; index += 1) {
-    const tokens = nodes[index];
+    const tokens = nodes[index].map((token) => token.type === "word" ? expandStaticWord(token, variables) : token);
     const position = commandPosition(tokens);
     const mutating = commandTargetedMutation(position, tokens, cwd, roots);
-    if (mutating) {
-      const operation = position.words.slice(position.index).map((word) => word.value).join(" ");
-      const approval = nodes.length === 1 && separators.length === 0
-        ? approvalFor(nodes[index], position, tokens, operation)
-        : "";
-      if (approval) return { denied: "", approval, operation };
-      return { denied: mutating, approval: "" };
-    }
+    if (mutating) return { denied: mutating };
     for (const token of tokens) {
       if (token.type === "group") {
-        const nested = analyzeProgram(token.content, context, cwd, roots, depth + 1);
-        if (nested.denied || nested.approval) return nested;
+        const nested = analyzeProgram(token.content, context, cwd, roots, depth + 1, variables);
+        if (nested.denied) return nested;
       }
       if (token.type === "word") {
         for (const substitution of token.subs) {
-          const nested = analyzeProgram(substitution.content, context, cwd, roots, depth + 1);
-          if (nested.denied || nested.approval) return nested;
+          const nested = analyzeProgram(substitution.content, context, cwd, roots, depth + 1, variables);
+          if (nested.denied) return nested;
         }
       }
     }
@@ -363,12 +430,16 @@ function analyzeProgram(source, context, cwd, roots, depth = 0) {
       const commandFlag = args.findIndex((word) => /^-[A-Za-z]*c[A-Za-z]*$/.test(word.value));
       const payload = commandFlag >= 0 ? args[commandFlag + 1] : null;
       if (payload?.literal && payload.subs.length === 0) {
-        const nested = analyzeProgram(payload.value, context, cwd, roots, depth + 1);
-        if (nested.denied || nested.approval) return nested;
+        const nested = analyzeProgram(payload.value, context, cwd, roots, depth + 1, variables);
+        if (nested.denied) return nested;
       }
     }
+    if (!position.command) applyAssignments(position.words, 0, position.words.length, variables);
+    else if (["export", "declare", "typeset", "readonly", "local"].includes(path.basename(position.command.value))) {
+      applyAssignments(position.words, position.index + 1, position.words.length, variables);
+    }
   }
-  return { denied: "", approval: "" };
+  return { denied: "" };
 }
 
 function toolTargets(payload, roots, cwd) {
@@ -376,10 +447,10 @@ function toolTargets(payload, roots, cwd) {
   const input = payload?.tool_input ?? payload?.toolInput ?? payload?.input ?? {};
   if (toolName === "bash" || toolName === "shell" || toolName === "run_terminal_command") {
     const command = input?.command ?? input?.cmd;
-    return typeof command === "string" ? analyzeProgram(command, {}, cwd, roots) : { denied: "", approval: "" };
+    return typeof command === "string" ? analyzeProgram(command, {}, cwd, roots) : { denied: "" };
   }
   const simpleName = toolName.split(/[.:/]/).at(-1);
-  if (!FILE_WRITE_TOOLS.has(simpleName)) return { denied: "", approval: "" };
+  if (!FILE_WRITE_TOOLS.has(simpleName)) return { denied: "" };
   const paths = [];
   const collect = (value, key = "") => {
     if (typeof value === "string") {
@@ -398,8 +469,8 @@ function toolTargets(payload, roots, cwd) {
     }
   };
   collect(input);
-  if (paths.some((value) => protectedPath(value, cwd, roots))) return { denied: `file tool ${toolName}`, approval: "" };
-  return { denied: "", approval: "" };
+  if (paths.some((value) => protectedPath(value, cwd, roots))) return { denied: `file tool ${toolName}` };
+  return { denied: "" };
 }
 
 function evaluate(payload, context) {
@@ -456,20 +527,6 @@ if (invokedDirectly()) {
       cwd: path.resolve(args.cwd),
     };
     const result = evaluate(payload, context);
-    if (result.approval) {
-      const approvalRecord = {
-        at: new Date().toISOString(),
-        approval: result.approval,
-        command: result.operation,
-      };
-      try {
-        appendFileSync(path.join(context.state, "project-write-approvals.jsonl"), `${JSON.stringify(approvalRecord)}\n`, { mode: 0o600 });
-      } catch {
-        result.decision = "deny";
-        result.code = "project-write-approval-log";
-        result.reason = `${denialReason(result.operation)} The approval could not be logged, so the operation remains blocked.`;
-      }
-    }
     if (result.decision === "deny") process.stdout.write(`deny\t${result.code}\t${result.reason}\n`);
     else process.stdout.write("allow\n");
   } catch {

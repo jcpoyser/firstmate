@@ -59,6 +59,15 @@ test_git_state_changes_are_denied() {
   done
   expect_deny 'git clone https://example.invalid/repo.git projects/foo'
   expect_deny 'git init projects/foo'
+  expect_deny 'GIT_DIR=projects/foo/.git git fetch origin'
+  expect_deny 'p=projects/foo; GIT_WORK_TREE="$p" git fetch origin'
+  expect_deny 'GIT_WORK_TREE=projects/foo git fetch origin'
+  expect_deny 'git --git-dir=projects/foo/.git fetch origin'
+  expect_deny 'git --work-tree=projects/foo fetch origin'
+  expect_deny 'env GIT_DIR=projects/foo/.git git fetch origin'
+  expect_deny 'git init --separate-git-dir=projects/foo/.git /tmp/fm-project-write-separate-dir'
+  expect_deny 'git init --separate-git-dir projects/foo/.git /tmp/fm-project-write-separate-dir-2'
+  expect_deny 'p=projects/foo; git -C "$p" fetch origin'
   expect_deny 'git worktree add projects/foo'
   expect_deny 'git worktree add -b scratch projects/foo'
   expect_deny 'git submodule add https://example.invalid/repo.git projects/foo/module'
@@ -73,6 +82,7 @@ test_git_reads_and_guarded_scripts_are_allowed() {
     expect_allow "git -C projects/foo $subcommand"
   done
   expect_allow 'git status'
+  expect_allow 'p=projects/foo; git -C "$p" status'
   expect_allow 'bin/fm-fleet-sync.sh'
   expect_allow 'bin/fm-merge-local.sh'
   expect_allow 'bin/fm-teardown.sh'
@@ -86,6 +96,18 @@ test_file_mutations_are_denied() {
   expect_deny 'cp notes.txt projects/foo/file'
   expect_deny 'cp -t projects/foo notes.txt'
   expect_deny 'echo changed > projects/foo/file'
+  expect_deny 'patch projects/foo/file < /tmp/update.diff'
+  expect_deny 'patch -d projects/foo < /tmp/update.diff'
+  expect_deny 'dd if=/dev/zero of=projects/foo/file'
+  expect_deny 'find projects/foo -delete'
+  expect_deny 'find projects/foo -type f -exec rm -f {} +'
+  expect_deny 'find projects/foo -type f -execdir rm -f {} +'
+  expect_deny 'find projects/foo -type f -exec sh -c "printf x > projects/foo/created" \\;'
+  expect_deny 'find /tmp -type f -exec rm -f projects/foo/file \\;'
+  expect_deny 'printf x > projects/foo/quoted-name'
+  expect_deny 'f=projects/foo/new.txt; printf x > "$f"'
+  expect_deny 'export f=projects/foo/exported.txt; printf x > "$f"'
+  expect_deny 'f=projects/foo/new.txt; dd if=/dev/zero of="$f"'
   expect_deny 'printf changed | tee projects/foo/file'
   expect_deny "sed -i 's/old/new/' projects/foo/file"
   expect_deny 'touch projects/foo/file'
@@ -93,6 +115,9 @@ test_file_mutations_are_denied() {
   expect_deny "bash -c 'git -C projects/foo fetch origin'"
   expect_deny 'git diff --output=projects/foo/diff.txt'
   expect_allow 'echo changed > /tmp/fm-project-write-safe-file'
+  expect_allow 'f=/tmp/fm-project-write-variable-safe; printf x > "$f"'
+  expect_allow 'find projects/foo -type f -exec cat {} +'
+  expect_allow 'patch -i /tmp/fm-project-write-input.diff'
   expect_allow 'sed -n 1p projects/foo/file'
   pass "project-write guard: blocks file writes while allowing reads and external writes"
 }
@@ -142,19 +167,10 @@ test_native_file_tools_are_guarded() {
   pass "project-write guard: denies native write/edit tools in all harness payload shapes"
 }
 
-test_command_scoped_approval_is_logged() {
-  local command out rc log
-  command="FM_PROJECT_WRITE_APPROVAL='Captain explicitly approved: git -C projects/foo fetch origin' git -C projects/foo fetch origin"
-  out=$(run_command "$command" 2>&1); rc=$?
-  [ "$rc" -eq 0 ] && [ -z "$out" ] || fail "matching per-command approval must allow: $out"
-  log="$PRIMARY/state/project-write-approvals.jsonl"
-  [ -s "$log" ] || fail "approved command was not logged"
-  jq -e '.approval == "Captain explicitly approved: git -C projects/foo fetch origin" and .command == "git -C projects/foo fetch origin"' "$log" >/dev/null \
-    || fail "approval log must bind the approval text to the exact command: $(cat "$log")"
-  expect_deny "FM_PROJECT_WRITE_APPROVAL='Captain explicitly approved: git -C projects/foo fetch wrong' git -C projects/foo fetch origin"
-  expect_deny "PATH=/tmp FM_PROJECT_WRITE_APPROVAL='Captain explicitly approved: git -C projects/foo fetch origin' git -C projects/foo fetch origin"
-  expect_deny "FM_PROJECT_WRITE_APPROVAL='Captain explicitly approved: git -C projects/foo fetch origin' git -C projects/foo fetch origin; git status"
-  pass "project-write guard: logs and permits only a matching one-command approval"
+test_caller_supplied_approval_cannot_bypass_guard() {
+  expect_deny "FM_PROJECT_WRITE_APPROVAL='Captain explicitly approved: git -C projects/foo fetch origin' git -C projects/foo fetch origin"
+  [ ! -e "$PRIMARY/state/project-write-approvals.jsonl" ] || fail "caller-supplied approval must not create an approval record"
+  pass "project-write guard: caller-supplied approval text cannot bypass the policy"
 }
 
 test_worker_worktree_is_inert() {
@@ -210,6 +226,6 @@ test_file_mutations_are_denied
 test_recorded_worker_copy_is_guarded
 test_shell_payload_parity
 test_native_file_tools_are_guarded
-test_command_scoped_approval_is_logged
+test_caller_supplied_approval_cannot_bypass_guard
 test_worker_worktree_is_inert
 test_adapter_configurations_and_open_code_plugin

@@ -16,11 +16,32 @@ make_fixture() {
   git init -q "$dir"
   git -C "$dir" -c user.name=FirstmateTest -c user.email=firstmate-test@example.invalid commit -q --allow-empty -m fixture
   : > "$dir/AGENTS.md"
-  cp "$ROOT/bin/fm-project-write-pretool-check.sh" "$dir/bin/"
+  cp "$ROOT/bin/fm-project-write-pretool-check.sh" "$dir/bin/fm-project-write-pretool-check.real.sh"
+  cat > "$dir/bin/fm-project-write-pretool-check.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+TRACE=${FM_PROJECT_WRITE_HOOK_TRACE:?}
+REAL_CHECKER="$(dirname "${BASH_SOURCE[0]}")/fm-project-write-pretool-check.real.sh"
+if [ "${1-}" = "--command" ]; then
+  payload=$(jq -cn --arg command "${2-}" '{tool_input:{command:$command}}')
+  "$REAL_CHECKER" "$@" > "$TRACE.stdout" 2> "$TRACE.stderr"
+  status=$?
+else
+  payload=$(cat)
+  printf '%s' "$payload" | "$REAL_CHECKER" "$@" > "$TRACE.stdout" 2> "$TRACE.stderr"
+  status=$?
+fi
+output=$(cat "$TRACE.stdout" "$TRACE.stderr")
+jq -cn --argjson input "$payload" --argjson status "$status" --arg output "$output" \
+  '{input:$input,status:$status,output:$output}' >> "$TRACE.jsonl"
+cat "$TRACE.stdout"
+cat "$TRACE.stderr" >&2
+exit "$status"
+SH
   cp "$ROOT/bin/fm-project-write-command-policy.mjs" "$dir/bin/"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/"
   cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/"
-  chmod +x "$dir/bin/fm-project-write-pretool-check.sh" "$dir/bin/fm-project-write-command-policy.mjs"
+  chmod +x "$dir/bin/fm-project-write-pretool-check.sh" "$dir/bin/fm-project-write-pretool-check.real.sh" "$dir/bin/fm-project-write-command-policy.mjs"
 
   case "$harness" in
     claude)
@@ -61,27 +82,27 @@ run_one() {
   case "$harness" in
     claude)
       version=$($binary --version 2>&1 | head -n 1)
-      (cd "$dir" && env -u GROK_AGENT -u GROK_HOOK_EVENT FM_HOME="$dir" "$binary" -p "$PROMPT" --dangerously-skip-permissions --output-format text) >"$log" 2>&1
+      (cd "$dir" && env -u GROK_AGENT -u GROK_HOOK_EVENT FM_HOME="$dir" FM_PROJECT_WRITE_HOOK_TRACE="$dir/state/project-write-hook" "$binary" -p "$PROMPT" --dangerously-skip-permissions --output-format text) >"$log" 2>&1
       status=$?
       ;;
     codex)
       version=$($binary --version 2>&1 | head -n 1)
-      (cd "$dir" && env FM_HOME="$dir" "$binary" exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT") >"$log" 2>&1
+      (cd "$dir" && env FM_HOME="$dir" FM_PROJECT_WRITE_HOOK_TRACE="$dir/state/project-write-hook" "$binary" exec --dangerously-bypass-hook-trust --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check "$PROMPT") >"$log" 2>&1
       status=$?
       ;;
     pi|pi-signed)
       version=$($binary --version 2>&1 | head -n 1)
-      (cd "$dir" && env FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" "$binary" -p -e "$dir/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files --no-session "$PROMPT") >"$log" 2>&1
+      (cd "$dir" && env FM_HOME="$dir" FM_ROOT_OVERRIDE="$dir" FM_PROJECT_WRITE_HOOK_TRACE="$dir/state/project-write-hook" "$binary" -p -e "$dir/.pi/extensions/fm-primary-turnend-guard.ts" --no-context-files --no-session "$PROMPT") >"$log" 2>&1
       status=$?
       ;;
     grok)
       version=$($binary --version 2>&1 | head -n 1)
-      (cd "$dir" && env FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" "$binary" --trust -p "$PROMPT" --permission-mode bypassPermissions --output-format plain) >"$log" 2>&1
+      (cd "$dir" && env FM_HOME="$dir" GROK_WORKSPACE_ROOT="$dir" FM_PROJECT_WRITE_HOOK_TRACE="$dir/state/project-write-hook" "$binary" --trust -p "$PROMPT" --permission-mode bypassPermissions --output-format plain) >"$log" 2>&1
       status=$?
       ;;
     opencode)
       version=$($binary --version 2>&1 | head -n 1)
-      (cd "$dir" && env FM_HOME="$dir" OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' "$binary" run --print-logs --log-level INFO "$PROMPT") >"$log" 2>&1
+      (cd "$dir" && env FM_HOME="$dir" FM_PROJECT_WRITE_HOOK_TRACE="$dir/state/project-write-hook" OPENCODE_CONFIG_CONTENT='{"permission":{"*":"allow"}}' "$binary" run --print-logs --log-level INFO "$PROMPT") >"$log" 2>&1
       status=$?
       ;;
     *)
@@ -89,7 +110,8 @@ run_one() {
       ;;
   esac
   [ ! -e "$dir/projects/foo/WRITE_GUARD_SENTINEL" ] || fail "$harness $version allowed a project write (exit $status); output: $(tail -n 20 "$log")"
-  grep -Eqi 'project-write|file redirection|hook blocked|write guard denied' "$log" || fail "$harness $version did not report the project-write hook denial (exit $status); output: $(tail -n 20 "$log")"
+  jq -e -s --arg sentinel 'projects/foo/WRITE_GUARD_SENTINEL' 'any(.[]; .status == 2 and (.output | contains("[project-write]")) and ([.input | .. | strings | select(contains($sentinel))] | length > 0))' "$dir/state/project-write-hook.jsonl" >/dev/null \
+    || fail "$harness $version did not submit the requested operation to the checker and receive its denial (exit $status); output: $(tail -n 20 "$log")"
   TESTED=$((TESTED + 1))
   pass "$harness $version: real PreToolUse denied the project write"
 }
