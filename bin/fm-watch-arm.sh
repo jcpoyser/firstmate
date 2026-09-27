@@ -85,6 +85,12 @@ if [ "${FM_GATE_REFUSE_BYPASS:-}" != 1 ]; then
       exit 1 ;;
   esac
 fi
+FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
+STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+# shellcheck source=bin/fm-primary-scope-lib.sh
+. "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-watch-arm.sh" || exit 1
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 
