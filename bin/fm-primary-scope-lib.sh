@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Shared marker-or-plain-checkout predicate for tracked hooks that must act only
-# in a genuine firstmate primary home.
-# This file is sourced by hook entrypoints and has no side effects on source.
-# fm_primary_root_matches is split out so a caller can confirm primary-home
-# identity before its gitignored state dir exists, such as to create it.
+# Shared marker-or-plain-checkout predicate for tracked hooks and supervisor
+# entrypoints scoped to a genuine firstmate primary home. This file is sourced
+# without side effects.
 
 # Return 0 when $1 carries a genuine secondmate-home marker.
 fm_root_is_secondmate_home() {
@@ -39,4 +37,44 @@ fm_primary_root_matches() {
 fm_primary_scope_matches() {
   local root=$1 state=$2
   fm_primary_root_matches "$root" && [ -d "$state" ]
+}
+
+fm_primary_checkout_matches() {
+  fm_primary_root_matches "$1"
+}
+
+fm_test_fixture_root_for_path() {
+  local path=$1 probe resolved marker
+  case "$path" in /*) ;; *) path="$PWD/$path" ;; esac
+  probe=$path
+  [ -d "$probe" ] || probe=$(dirname "$probe")
+  while [ -n "$probe" ] && [ "$probe" != / ]; do
+    [ -d "$probe" ] && resolved=$(cd -P "$probe" 2>/dev/null && pwd -P) || resolved=
+    if [ -n "$resolved" ]; then
+      marker="$resolved/.fm-test-fixture"
+      if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+        printf '%s\n' "$resolved"
+        return 0
+      fi
+    fi
+    probe=$(dirname "$probe")
+  done
+  return 1
+}
+
+fm_primary_test_home_isolated() {
+  local home=${FM_HOME:-} state=${FM_STATE_OVERRIDE:-} home_root state_root
+  [ -n "$home" ] || return 1
+  [ -n "$state" ] || state="$home/state"
+  home_root=$(fm_test_fixture_root_for_path "$home") || return 1
+  state_root=$(fm_test_fixture_root_for_path "$state") || return 1
+  [ "$home_root" = "$state_root" ]
+}
+
+fm_primary_supervisor_guard() {  # <root> <entrypoint>
+  local root=$1 entrypoint=$2
+  fm_primary_checkout_matches "$root" && return 0
+  fm_primary_test_home_isolated && return 0
+  printf 'error: refusing supervisor-only %s from a crew/scout worktree or non-primary checkout; return to your own task\n' "$entrypoint" >&2
+  return 1
 }
