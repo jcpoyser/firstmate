@@ -774,6 +774,48 @@ test_captain_answer_uses_authoritative_hold_identity() {
   pass "fm-send binds recorded answers to the exact-first authoritative hold identity"
 }
 
+test_legacy_declined_answer_can_be_relayed() {
+  local dir fb log err home hold_id decision digest body rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; legacy captain-answer relay needs its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/legacy-declined-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home legacy-declined-answer)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/td1.meta" "window=sess:fm-td1" "kind=ship"
+  printf 'needs-decision [key=route-choice]: choose a route\n' > "$home/state/td1.status"
+  hold_id=td1-decision-route-choice
+  setup_captain_hold "$home" "$hold_id"
+  decision='Declined: keep the current shape.'
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$decision" | shasum -a 256 | awk '{print $1}')
+  else
+    digest=$(printf '%s' "$decision" | sha256sum | awk '{print $1}')
+  fi
+  body="$home/data/legacy-decline-body.txt"
+  printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nResolution mode: declined\n\nCaptain decision:\n%s\n' \
+    "$digest" "$decision" > "$body"
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi update "$hold_id" \
+    --body-file "$body" --archive-body >/dev/null) \
+    || fail "could not seed the completed legacy declined-answer record"
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi done "$hold_id" >/dev/null) \
+    || fail "could not close the legacy captain-held task"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" td1 --resolve-key route-choice \
+    --captain-answer "$hold_id" 'Keep the current shape.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a recorded legacy decline should authorize relaying the captain's answer: $(cat "$err")"
+  grep -qF 'Keep the current shape.' "$home/state/td1.inbox/001.msg" \
+    || fail "the legacy declined captain answer did not reach the worker"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/td1.status" \
+    | grep -qF 'resolved [key=route-choice]: answered: Keep the current shape.' \
+    || fail "the relayed legacy declined answer did not close its review decision"
+  pass "fm-send relays decisions with a recorded legacy declined answer"
+}
+
 test_answer_send_closes_open_decision() {
   local dir fb log home rc out
   dir="$TMP_ROOT/closes"; mkdir -p "$dir"
@@ -1579,6 +1621,7 @@ test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
 test_captain_answer_uses_authoritative_hold_identity
+test_legacy_declined_answer_can_be_relayed
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
