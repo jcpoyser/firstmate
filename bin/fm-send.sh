@@ -605,13 +605,24 @@ fi
 RESOLVE_STATUS_FILE=
 CAPTAIN_POLICY_STATUS_FILE=
 CAPTAIN_POLICY_OPEN_SET=
+fm_send_status_open_decisions() { # <status-file>
+  local file=$1 directory=${1%/*}
+  [ -d "$directory" ] && [ -r "$directory" ] && [ -x "$directory" ] || return 1
+  if [ -e "$file" ] || [ -L "$file" ]; then
+    [ -f "$file" ] && [ -r "$file" ] && [ ! -L "$file" ] || return 1
+  fi
+  status_open_decisions "$file"
+}
 CAPTAIN_OPEN_NEEDS_KEYS=
 CAPTAIN_POLICY_TASK_ID=
 CAPTAIN_POLICY_INVENTORY=
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_META" ]; then
   CAPTAIN_POLICY_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   CAPTAIN_POLICY_STATUS_FILE="$STATE/$CAPTAIN_POLICY_TASK_ID.status"
-  CAPTAIN_POLICY_OPEN_SET=$(status_open_decisions "$CAPTAIN_POLICY_STATUS_FILE")
+  if ! CAPTAIN_POLICY_OPEN_SET=$(fm_send_status_open_decisions "$CAPTAIN_POLICY_STATUS_FILE"); then
+    echo "error: cannot read or fold decision status file '$CAPTAIN_POLICY_STATUS_FILE'; refusing to send" >&2
+    exit 1
+  fi
   CAPTAIN_POLICY_INVENTORY=$(fm_meta_get "$TARGET_META" decision_keys)
   while IFS=$'\t' read -r policy_key policy_verb _policy_summary; do
     [ "$policy_verb" = needs-decision ] || continue
@@ -642,25 +653,23 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 FM_SEND_AUTHORITATIVE_HOLD_ID=
 FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
 fm_send_authoritative_hold() {
-  local id rc
+  local resolved rc
   FM_SEND_AUTHORITATIVE_HOLD_ID=
   FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
-  for id in "$2" "$1-decision-$2"; do
-    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
-      "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" --distinguish-absent >/dev/null 2>&1; then
-      FM_SEND_AUTHORITATIVE_HOLD_ID=$id
-      FM_SEND_AUTHORITATIVE_HOLD_OPEN=1
-      return 0
-    else
-      rc=$?
-      case "$rc" in
-        1) FM_SEND_AUTHORITATIVE_HOLD_ID=$id; return 0 ;;
-        3) : ;;
-        *) return "$rc" ;;
-      esac
-    fi
-  done
-  return 1
+  resolved=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" resolve-entry "$1" "$2" 2>/dev/null) || return $?
+  if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$resolved" --distinguish-absent >/dev/null 2>&1; then
+    FM_SEND_AUTHORITATIVE_HOLD_OPEN=1
+  else
+    rc=$?
+    case "$rc" in
+      1) : ;;
+      *) return "$rc" ;;
+    esac
+  fi
+  FM_SEND_AUTHORITATIVE_HOLD_ID=$resolved
+  return 0
 }
 
 fm_send_hold_resolved_id() { # <task-id> <decision-key>
@@ -785,7 +794,10 @@ if [ -n "$RESOLVE_KEYS" ]; then
   fi
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
-  resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  if ! resolve_open_set=$(fm_send_status_open_decisions "$RESOLVE_STATUS_FILE"); then
+    echo "error: cannot read or fold decision status file '$RESOLVE_STATUS_FILE'; refusing to send" >&2
+    exit 1
+  fi
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
@@ -942,7 +954,10 @@ fm_send_close_resolved_keys() { # <answer-text>
     echo "error: the answer was delivered to $T, but the close for decision key(s) '$RESOLVE_STATUS_KEYS' could not be appended to $RESOLVE_STATUS_FILE. Close it manually with: $manual_close_cmd - do not resend the answer." >&2
     return 1
   fi
-  still=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  if ! still=$(fm_send_status_open_decisions "$RESOLVE_STATUS_FILE"); then
+    echo "error: the answer was delivered to $T, but decision status file $RESOLVE_STATUS_FILE could not be read to verify the close; do not resend the answer." >&2
+    return 1
+  fi
   for k in $RESOLVE_STATUS_KEYS; do
     case "$still" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)

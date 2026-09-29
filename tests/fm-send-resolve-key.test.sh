@@ -91,6 +91,14 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+  cat > "$fb/date" <<'SH'
+#!/usr/bin/env bash
+if [ -n "${FM_FAKE_DATE_CHMOD_AFTER_INBOX:-}" ] && [ -e "${FM_FAKE_DATE_INBOX:-}" ]; then
+  chmod 0444 "$FM_FAKE_DATE_CHMOD_AFTER_INBOX"
+fi
+exec /bin/date "$@"
+SH
+  chmod +x "$fb/date"
   # Stub ssh transport for the remote-secondmate legs, selected via FM_SSH_BIN.
   # Records the full remote invocation and exits FM_FAKE_SSH_RC (default 0).
   cat > "$fb/fake-ssh" <<'SH'
@@ -318,6 +326,124 @@ test_decision_declaration_is_structural_and_logged() {
   pass "fm-send requires and logs structural decision declarations without inspecting steer wording"
 }
 
+test_invalid_status_source_refuses_policy_and_key_resolution() {
+  local dir fb log err home key_home rc source
+  dir="$TMP_ROOT/invalid-decision-status"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home invalid-decision-status)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tabsent.meta" "window=sess:fm-tabsent" "kind=ship"
+  run_send "$fb" "$home" "$log" tabsent 'routine progress'; rc=$?
+  expect_code 0 "$rc" "an absent status file should retain its no-open-decisions behavior"
+
+  fm_write_meta "$home/state/tbad.meta" "window=sess:fm-tbad" "kind=ship"
+  source="$home/state/decision-source"
+  printf 'needs-decision [key=review]: choose a route\n' > "$source"
+  ln -s "$source" "$home/state/tbad.status"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" tbad 'routine progress' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a symlinked decision-status source was treated as an empty ledger"
+  assert_contains "$(cat "$err")" "cannot read or fold decision status file" \
+    "the policy refusal should identify the invalid status source"
+  [ ! -e "$home/state/tbad.inbox/001.msg" ] || fail "the steer reached a worker with an invalid status source"
+
+  fm_write_meta "$home/state/tdir.meta" "window=sess:fm-tdir" "kind=ship"
+  mkdir "$home/state/tdir.status"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" tdir 'routine progress' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a non-regular decision-status source was treated as an empty ledger"
+  [ ! -e "$home/state/tdir.inbox/001.msg" ] || fail "the steer reached a worker with a non-regular status source"
+
+  if [ "$(id -u)" -ne 0 ]; then
+    fm_write_meta "$home/state/tunreadable.meta" "window=sess:fm-tunreadable" "kind=ship"
+    status="$home/state/tunreadable.status"
+    printf 'needs-decision [key=review]: choose a route\n' > "$status"
+    chmod 000 "$status"
+    env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+      "$SEND" tunreadable 'routine progress' >/dev/null 2>"$err"; rc=$?
+    chmod 0600 "$status"
+    [ "$rc" -ne 0 ] || fail "an unreadable decision-status source was treated as an empty ledger"
+    assert_contains "$(cat "$err")" "cannot read or fold decision status file" \
+      "the unreadable-source refusal should identify the invalid status source"
+    [ ! -e "$home/state/tunreadable.inbox/001.msg" ] || fail "the steer reached a worker with an unreadable status source"
+  fi
+
+  if command -v tasks-axi >/dev/null 2>&1; then
+    key_home=$(setup_home invalid-status-key-resolution)
+    fm_write_meta "$key_home/state/tkey.meta" "window=sess:fm-tkey" "kind=ship"
+    ln -s "$source" "$key_home/state/tkey.status"
+    setup_captain_hold "$key_home" foo
+    env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$key_home" FM_HOME="$key_home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+      FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tkey --resolve-key foo 'answer the held key' \
+      >/dev/null 2>"$err"; rc=$?
+    [ "$rc" -ne 0 ] || fail "the named-key fold treated an invalid status source as no live key and delivered via a held task"
+    assert_contains "$(cat "$err")" "cannot read or fold decision status file" \
+      "the named-key refusal should identify the invalid status source"
+    [ ! -e "$key_home/state/tkey.inbox/001.msg" ] || fail "the answer reached a worker despite an invalid status source"
+  fi
+  pass "fm-send fails closed on existing invalid status sources while preserving absent-file behavior"
+}
+
+test_typed_no_decision_declaration_append_failure_prevents_delivery() {
+  local dir fb log err home status rc
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'ok - skipped (read-only status append refusal is not testable as root)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/typed-no-decision-append-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home typed-no-decision-append-fail)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/ttdf.meta" "window=sess:fm-ttdf" "kind=ship"
+  status="$home/state/ttdf.status"
+  printf 'needs-decision [key=review]: choose a route\n' > "$status"
+  chmod 0444 "$status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" sess:fm-ttdf --no-decision 'routine progress' >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$status"
+  [ "$rc" -ne 0 ] || fail "typed delivery succeeded despite a failed declaration append"
+  assert_contains "$(cat "$err")" "captain-decision declaration could not be recorded" \
+    "the typed append refusal should identify the missing declaration"
+  [ ! -s "$log" ] || fail "the typed steer reached a terminal without its declaration record"
+  pass "fm-send refuses typed delivery when it cannot record the no-decision declaration"
+}
+
+test_inbox_no_decision_declaration_precedes_later_close_failure() {
+  local dir fb log err home status rc
+  if [ "$(id -u)" -eq 0 ]; then
+    printf 'ok - skipped (read-only status append refusal is not testable as root)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/inbox-declaration-before-close-fail"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home inbox-declaration-before-close-fail)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tibf.meta" "window=sess:fm-tibf" "kind=ship"
+  status="$home/state/tibf.status"
+  printf 'needs-decision [key=review]: choose a route\nblocked [key=dependency]: refresh dependency\n' > "$status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_FAKE_DATE_CHMOD_AFTER_INBOX="$status" \
+    FM_FAKE_DATE_INBOX="$home/state/tibf.inbox/001.msg" \
+    "$SEND" tibf --no-decision --resolve-key dependency 'refresh dependency' \
+    >/dev/null 2>"$err"; rc=$?
+  chmod 0600 "$status"
+  [ "$rc" -ne 0 ] || fail "the expected post-delivery inbox close failure did not occur"
+  assert_contains "$(cat "$err")" "the answer was delivered" \
+    "the close failure should report that inbox delivery already occurred"
+  [ -e "$home/state/tibf.inbox/001.msg" ] || fail "the inbox steer was not durably delivered before the close failure"
+  [ "$(sed -E 's/ \[at=[0-9]+\]//' "$status" | grep -Fc 'note: decision-declaration: no-decision')" -eq 1 ] \
+    || fail "the declaration was not recorded exactly once before the later inbox bookkeeping failure"
+  if grep -F 'resolved [key=dependency]' "$status" >/dev/null; then
+    fail "the deliberately failed inbox close unexpectedly appeared in the status record"
+  fi
+  pass "fm-send records the decision declaration before a later inbox bookkeeping failure"
+}
+
 test_no_decision_declaration_append_failure_prevents_delivery() {
   local dir fb log err home status rc
   if [ "$(id -u)" -eq 0 ]; then
@@ -490,8 +616,7 @@ test_resolved_hold_answer_intake_uses_canonical_data() {
   fi
   if ! env -u FM_TASKS_AXI_COMPATIBLE bash -c ". \"\$1\"; fm_tasks_axi_compatible" \
     _ "$ROOT/bin/fm-tasks-axi-lib.sh" >/dev/null 2>&1; then
-    printf 'ok - skipped (installed tasks-axi is not compatible with nested captain-answer intake)\n'
-    return 0
+    fail "tasks-axi must meet firstmate's required version and command-surface compatibility for nested captain-answer intake"
   fi
   dir="$TMP_ROOT/captain-answer-intake-scope"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
@@ -647,6 +772,137 @@ test_captain_answer_uses_authoritative_hold_identity() {
   grep -qF 'Use the legacy route.' "$home/state/ta3.inbox/001.msg" \
     || fail "the valid legacy answer did not reach the worker"
   pass "fm-send binds recorded answers to the exact-first authoritative hold identity"
+}
+
+test_migrated_beads_hold_is_gated_and_uses_canonical_id() {
+  local dir home graph beads fb log err scout key legacy canonical answer resolved rc
+  if ! command -v bd >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (Beads migration relay requires bd, jq, and tasks-axi)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/migrated-beads-send"; home="$dir/home"; graph="$dir/fm"
+  mkdir -p "$home/data" "$home/config" "$home/state" "$graph"
+  git -C "$graph" init -q
+  if ! (cd "$graph" && bd init >"$dir/bd-init.log" 2>&1); then
+    printf 'ok - skipped (bd cannot initialize the Beads migration fixture)\n'
+    return 0
+  fi
+  beads="$graph/.beads"
+  cat > "$home/.tasks.toml" <<EOF
+backend = "beads"
+
+[beads]
+path = "$beads"
+binary = "bd"
+prefix = "fm"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  if ! (cd "$home" && tasks-axi list >/dev/null 2>&1); then
+    printf 'ok - skipped (tasks-axi does not support the Beads backend required for migration relay)\n'
+    return 0
+  fi
+
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  scout=sample-migrated-scout; key=github-delete
+  legacy="$scout-decision-$key"; canonical=fm-relocated-captain-call
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add "$canonical" \
+    'Captain call moved during migration' --repo sample >/dev/null) \
+    || fail "could not create the migrated captain-held task"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold "$canonical" --kind captain \
+    --reason 'captain must decide' >/dev/null) \
+    || fail "could not hold the migrated captain task"
+  BEADS_DIR="$beads" bd note "$canonical" \
+    "migrated from data/backlog.md id $legacy on 2026-09-04" >/dev/null \
+    || fail "could not record the legacy identity on the migrated task"
+  fm_write_meta "$home/state/$scout.meta" "window=sess:fm-$scout" "kind=ship"
+  printf 'needs-decision [key=%s]: choose whether to delete the repo\n' "$key" \
+    > "$home/state/$scout.status"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE='' \
+    "$CAPTAIN_HOLD" complete "$scout" "$key" >/dev/null \
+    || fail "complete did not transfer the migrated decision"
+  resolved=$(FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE='' \
+    "$CAPTAIN_HOLD" resolve-entry "$scout" "$key") \
+    || fail "the shared resolver did not resolve the migrated identity"
+  [ "$resolved" = "$canonical" ] \
+    || fail "the shared resolver returned '$resolved' instead of canonical task id '$canonical'"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_DATA_OVERRIDE='' \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" "$scout" 'routine progress' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unresolved migrated captain hold failed to gate an ordinary steer"
+  assert_contains "$(cat "$err")" "open decision key(s) '$key'" \
+    "the migrated decision refusal should name its inventory key"
+  [ ! -e "$home/state/$scout.inbox/001.msg" ] \
+    || fail "an ordinary steer reached the worker despite the migrated hold"
+
+  answer="$home/data/captain-answer.txt"
+  printf 'Do not delete the repository.\n' > "$answer"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE='' \
+    "$CAPTAIN_HOLD" answer "$canonical" --decision-file "$answer" >/dev/null \
+    || fail "could not record the answer on the canonical migrated task"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_DATA_OVERRIDE='' \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" "$scout" --resolve-key "$key" --captain-answer "$legacy" \
+    'Do not delete the repository.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "the legacy alias authorized an answer instead of the canonical migrated task"
+  [ ! -e "$home/state/$scout.inbox/001.msg" ] \
+    || fail "the legacy alias answer reached the worker"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_DATA_OVERRIDE='' \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" "$scout" --resolve-key "$key" --captain-answer "$canonical" \
+    'Do not delete the repository.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the canonical migrated answer should resolve its transferred decision: $(cat "$err")"
+  grep -qF 'Do not delete the repository.' "$home/state/$scout.inbox/001.msg" \
+    || fail "the canonical migrated captain answer did not reach the worker"
+  pass "fm-send gates migrated captain holds and authorizes their canonical task ids"
+}
+
+test_legacy_declined_answer_can_be_relayed() {
+  local dir fb log err home hold_id decision digest body rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is not installed; legacy captain-answer relay needs its durable backlog)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/legacy-declined-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home legacy-declined-answer)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/td1.meta" "window=sess:fm-td1" "kind=ship"
+  printf 'needs-decision [key=route-choice]: choose a route\n' > "$home/state/td1.status"
+  hold_id=td1-decision-route-choice
+  setup_captain_hold "$home" "$hold_id"
+  decision='Declined: keep the current shape.'
+  if command -v shasum >/dev/null 2>&1; then
+    digest=$(printf '%s' "$decision" | shasum -a 256 | awk '{print $1}')
+  else
+    digest=$(printf '%s' "$decision" | sha256sum | awk '{print $1}')
+  fi
+  body="$home/data/legacy-decline-body.txt"
+  printf 'Resolution recorded by fm-decision-hold.\nDecision digest: %s\nResolution mode: declined\n\nCaptain decision:\n%s\n' \
+    "$digest" "$decision" > "$body"
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi update "$hold_id" \
+    --body-file "$body" --archive-body >/dev/null) \
+    || fail "could not seed the completed legacy declined-answer record"
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi done "$hold_id" >/dev/null) \
+    || fail "could not close the legacy captain-held task"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" td1 --resolve-key route-choice \
+    --captain-answer "$hold_id" 'Keep the current shape.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a recorded legacy decline should authorize relaying the captain's answer: $(cat "$err")"
+  grep -qF 'Keep the current shape.' "$home/state/td1.inbox/001.msg" \
+    || fail "the legacy declined captain answer did not reach the worker"
+  sed -E 's/ \[at=[0-9]+\]//' "$home/state/td1.status" \
+    | grep -qF 'resolved [key=route-choice]: answered: Keep the current shape.' \
+    || fail "the relayed legacy declined answer did not close its review decision"
+  pass "fm-send relays decisions with a recorded legacy declined answer"
 }
 
 test_answer_send_closes_open_decision() {
@@ -1445,12 +1701,17 @@ test_captain_answer_scope_is_this_home
 test_resolved_hold_answer_intake_uses_canonical_data
 test_remote_captain_decision_guard_runs_before_transport
 test_decision_declaration_is_structural_and_logged
+test_invalid_status_source_refuses_policy_and_key_resolution
+test_typed_no_decision_declaration_append_failure_prevents_delivery
+test_inbox_no_decision_declaration_precedes_later_close_failure
 test_no_decision_declaration_append_failure_prevents_delivery
 test_no_decision_declaration_precedes_later_close_failure
 test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
 test_captain_answer_uses_authoritative_hold_identity
+test_migrated_beads_hold_is_gated_and_uses_canonical_id
+test_legacy_declined_answer_can_be_relayed
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced
 test_separate_resolve_key_answers_do_not_rewake
