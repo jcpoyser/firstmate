@@ -130,11 +130,20 @@ While tasks are in flight, dispatch shared-repo edits to a crewmate.
 
 ## Captain decision enforcement (config/captain-decides-findings)
 
-The optional local, gitignored `config/captain-decides-findings` presence flag requires an explicit decision declaration when a task has an open `needs-decision` key or an unresolved captain-held inventory decision. Use `--resolve-key <key>` for each decision this send answers, paired with that decision's recorded answer via `--captain-answer <task-id>`, or use `--no-decision` when the send answers none. The declaration is recorded in the task status; `--no-decision` cannot accompany a resolved `needs-decision` or captain-held key, but can accompany unrelated `blocked`-key resolution.
+The optional local, gitignored `config/captain-decides-findings` flag requires an explicit decision declaration when a task has an open `needs-decision` key or an unresolved captain-held inventory decision.
+A plain steer cannot stand in for an answer: the matching captain-held task must have a current answer recorded through `bin/fm-captain-hold.sh answer`, and the send must name that task with `--captain-answer <task-id>` alongside `--resolve-key <key>`.
+Use `--no-decision` only for a steer that does not answer any open decision; it does not close or answer that decision.
 
-A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity. `bin/fm-captain-hold.sh answer-recorded` checks that a current answer record exists before delivery. This is a firstmate attestation, not proof that the captain authored the answer. The existing record store retains who wrote the record and when.
+Every inventory entry stays open unless its exact authoritative task record proves a current answer.
+A missing or unreadable task, a closed task without an answer, or a migrated record that cannot be authoritatively resolved all block plain steers; uncertainty is not treated as an empty inventory.
+A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity.
+`answer-recorded` is a firstmate attestation, not proof that the captain authored the answer; the existing record store retains who wrote it and when.
 
-No message wording is inspected. The flag is local to this home and is not inherited by secondmate homes. When the flag is absent, send behavior is unchanged.
+With the flag present, the literal `no-mistakes axi respond` command is also refused when the task has an open `needs-decision` key not named by `--resolve-key`.
+This guard recognizes the literal command form; aliases and wrappers are not inferred.
+Other steer wording is not inspected.
+The flag is local to this home and is not inherited by secondmate homes.
+When the flag is absent, send behavior is unchanged.
 
 ## Calm preference (config/calm)
 

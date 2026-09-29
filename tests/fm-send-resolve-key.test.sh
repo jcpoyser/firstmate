@@ -728,7 +728,7 @@ test_closed_unanswered_transferred_hold_still_gates_steers() {
   setup_captain_hold "$home" closed-choice
   FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
     "$CAPTAIN_HOLD" complete tclosed closed-choice >/dev/null
-  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi done closed-choice >/dev/null) \
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi 'done' closed-choice >/dev/null) \
     || fail "could not close the transferred hold without recording an answer"
 
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
@@ -740,6 +740,84 @@ test_closed_unanswered_transferred_hold_still_gates_steers() {
   [ ! -e "$home/state/tclosed.inbox/001.msg" ] \
     || fail "the ordinary steer reached the worker despite an unanswered transferred hold"
   pass "fm-send keeps closed unanswered transferred decisions in the captain gate"
+}
+
+test_missing_and_unreadable_inventory_holds_block_plain_steers() {
+  local dir fb log err home rc backlog
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for captain-hold inventory enforcement)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/incomplete-captain-inventory"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+
+  home=$(setup_home missing-inventory-hold)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tmissing.meta" "window=sess:fm-tmissing" "kind=ship" \
+    "decision_keys=missing-choice"
+  setup_captain_hold "$home" unrelated-choice
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tmissing 'routine progress' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a missing inventory task was treated as a settled decision"
+  assert_contains "$(cat "$err")" "open decision key(s) 'missing-choice'" \
+    "a missing inventory task should remain an open captain decision"
+  [ ! -e "$home/state/tmissing.inbox/001.msg" ] \
+    || fail "a steer reached the worker despite a missing inventory task"
+
+  if [ "$(id -u)" -ne 0 ]; then
+    home=$(setup_home unreadable-inventory-hold)
+    mkdir -p "$home/config"
+    : > "$home/config/captain-decides-findings"
+    fm_write_meta "$home/state/tunreadable-hold.meta" "window=sess:fm-tunreadable-hold" \
+      "kind=ship" "decision_keys=unreadable-choice"
+    setup_captain_hold "$home" unreadable-choice
+    backlog="$home/data/backlog.md"
+    chmod 000 "$backlog"
+    env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tunreadable-hold 'routine progress' \
+      >/dev/null 2>"$err"; rc=$?
+    chmod 0600 "$backlog"
+    [ "$rc" -ne 0 ] || fail "an unreadable captain-held task was treated as a settled decision"
+    assert_contains "$(cat "$err")" "open decision key(s) 'unreadable-choice'" \
+      "an unreadable inventory task should remain an open captain decision"
+    [ ! -e "$home/state/tunreadable-hold.inbox/001.msg" ] \
+      || fail "a steer reached the worker despite an unreadable captain-held task"
+  else
+    printf 'ok - skipped unreadable-file leg (permission denial is not testable as root)\n'
+  fi
+  pass "fm-send keeps missing and unreadable captain-held inventory decisions open"
+}
+
+test_no_mistakes_response_requires_the_open_decision_key() {
+  local dir fb log err home rc
+  dir="$TMP_ROOT/gate-bypass"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home gate-bypass)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tgate.meta" "window=sess:fm-tgate" "kind=ship"
+  printf 'needs-decision [key=review-choice]: review decision\\n' \
+    > "$home/state/tgate.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" tgate 'no-mistakes axi respond --action approve' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a no-mistakes response command bypassed an open needs-decision key"
+  assert_contains "$(cat "$err")" "requires --resolve-key 'review-choice'" \
+    "the gate-response refusal should name the required decision key"
+  [ ! -s "$log" ] || fail "a refused no-mistakes response command was typed"
+  [ ! -e "$home/state/tgate.inbox/001.msg" ] \
+    || fail "a refused no-mistakes response command reached the worker"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 "$SEND" tgate --resolve-key unrelated-choice \
+    'no-mistakes axi respond --action approve' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrelated resolve key bypassed the open gate decision"
+  [ ! -e "$home/state/tgate.inbox/001.msg" ] \
+    || fail "a response with the wrong resolve key reached the worker"
+  pass "fm-send requires the exact open key for a literal no-mistakes response command"
 }
 
 test_captain_answer_uses_authoritative_hold_identity() {
@@ -920,7 +998,7 @@ test_legacy_declined_answer_can_be_relayed() {
   (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi update "$hold_id" \
     --body-file "$body" --archive-body >/dev/null) \
     || fail "could not seed the completed legacy declined-answer record"
-  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi done "$hold_id" >/dev/null) \
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi 'done' "$hold_id" >/dev/null) \
     || fail "could not close the legacy captain-held task"
 
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
@@ -1740,6 +1818,8 @@ test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
 test_closed_unanswered_transferred_hold_still_gates_steers
+test_missing_and_unreadable_inventory_holds_block_plain_steers
+test_no_mistakes_response_requires_the_open_decision_key
 test_captain_answer_uses_authoritative_hold_identity
 test_migrated_beads_hold_is_gated_and_uses_canonical_id
 test_legacy_declined_answer_can_be_relayed

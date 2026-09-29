@@ -208,14 +208,16 @@
 # this home), and an empty message.
 #
 # When config/captain-decides-findings is present and the task has an open
-# needs-decision key or unresolved captain-held inventory decision, each answer
-# must name its key with --resolve-key and matching --captain-answer
-# <task-id>; a send answering none must use
-# --no-decision. Answered keys and no-decision declarations are recorded in
-# the task status. The answer-record check is a firstmate attestation, not
-# proof of captain authorship. These checks apply to task metadata reached
-# through a selector or matching explicit endpoint, before local enqueue or
-# remote transport.
+# needs-decision key or captain-held inventory decision, each answer must name
+# its key with --resolve-key and matching --captain-answer <task-id>; a send
+# answering none must use --no-decision. Missing, unreadable, closed-unanswered,
+# and unresolved migrated inventory records remain open and block an unmarked
+# steer. A literal no-mistakes axi respond command must name every open
+# needs-decision key with --resolve-key. Answered keys and no-decision
+# declarations are recorded in the task status. The answer-record check is a
+# firstmate attestation, not proof of captain authorship. These checks apply to
+# task metadata reached through a selector or matching explicit endpoint,
+# before local enqueue or remote transport.
 # With the flag absent, existing behavior is unchanged.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
@@ -683,6 +685,13 @@ fm_send_captain_answer_recorded() { # <task-id>
     "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$1" >/dev/null
 }
 
+fm_send_add_open_held_key() {
+  case " $CAPTAIN_OPEN_HELD_KEYS " in
+    *" $1 "*) ;;
+    *) CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$1" ;;
+  esac
+}
+
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; then
   local_inventory_keys=()
   IFS=, read -r -a local_inventory_keys <<< "$CAPTAIN_POLICY_INVENTORY"
@@ -704,20 +713,23 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; th
           fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
           case "$answer_rc" in
             0) : ;;
-            1) CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$inventory_key" ;;
+            1) fm_send_add_open_held_key "$inventory_key" ;;
             *) echo "error: cannot verify recorded captain answer for '$inventory_key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
           esac
         fi
         ;;
-      1) : ;;
+      1) fm_send_add_open_held_key "$inventory_key" ;;
       *) echo "error: cannot verify captain-held decision '$inventory_key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
     esac
   done
 fi
 CAPTAIN_OPEN_DECISION_KEYS=$CAPTAIN_OPEN_NEEDS_KEYS
-if [ -n "$CAPTAIN_OPEN_HELD_KEYS" ]; then
-  CAPTAIN_OPEN_DECISION_KEYS="${CAPTAIN_OPEN_DECISION_KEYS}${CAPTAIN_OPEN_DECISION_KEYS:+ }$CAPTAIN_OPEN_HELD_KEYS"
-fi
+for inventory_key in $CAPTAIN_OPEN_HELD_KEYS; do
+  case " $CAPTAIN_OPEN_DECISION_KEYS " in
+    *" $inventory_key "*) ;;
+    *) CAPTAIN_OPEN_DECISION_KEYS="${CAPTAIN_OPEN_DECISION_KEYS}${CAPTAIN_OPEN_DECISION_KEYS:+ }$inventory_key" ;;
+  esac
+done
 
 FM_SEND_MATCHED_CAPTAIN_ANSWER=
 fm_send_captain_answer_for_key() { # <decision-key>
@@ -889,6 +901,18 @@ if [ -n "$RESOLVE_KEYS" ]; then
       echo "error: --resolve-key cannot close a decision key of length ${#k}: its ${#probe_line}-character close record exceeds the $FM_LINE_CAP_DEFAULT-character status-line cap, and truncation would remove the structural key delimiter. Refusing rather than writing an ineffective close; nothing was sent." >&2
       exit 1
     fi
+  done
+fi
+
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [[ "$*" =~ (^|[[:space:]])no-mistakes[[:space:]]+axi[[:space:]]+respond([[:space:]]|$) ]]; then
+  for policy_key in $CAPTAIN_OPEN_NEEDS_KEYS; do
+    case " $RESOLVE_KEYS " in
+      *" $policy_key "*) ;;
+      *)
+        echo "error: no-mistakes gate response for open needs-decision key '$policy_key' requires --resolve-key '$policy_key'; nothing was sent" >&2
+        exit 1
+        ;;
+    esac
   done
 fi
 
