@@ -212,8 +212,8 @@
 # its key with --resolve-key and matching --captain-answer <task-id>; a send
 # answering none must use --no-decision. Missing, unreadable, closed-unanswered,
 # and unresolved migrated inventory records remain open and block an unmarked
-# steer. A literal no-mistakes axi respond command must name every open
-# needs-decision key with --resolve-key. Answered keys and no-decision
+# steer. A --resolve-key naming neither an open status key nor an inventory
+# decision is refused. Answered keys and no-decision
 # declarations are recorded in the task status. The answer-record check is a
 # firstmate attestation, not proof of captain authorship. These checks apply to
 # task metadata reached through a selector or matching explicit endpoint,
@@ -834,6 +834,15 @@ if [ -n "$RESOLVE_KEYS" ]; then
     # Not open in the status log. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
     # through the other ledger - so check there before refusing.
+    if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
+      case ",$CAPTAIN_POLICY_INVENTORY," in
+      *",$k,"*) : ;;
+      *)
+        echo "error: --resolve-key '$k': no open decision in $RESOLVE_STATUS_FILE and no captain-held decision '$k' in this task's inventory; nothing was sent." >&2
+        exit 1
+        ;;
+      esac
+    fi
     if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && fm_send_captain_answer_for_key "$k"; then
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
       RESOLVE_PREANSWERED_HOLD_KEYS="${RESOLVE_PREANSWERED_HOLD_KEYS}${RESOLVE_PREANSWERED_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
@@ -901,18 +910,6 @@ if [ -n "$RESOLVE_KEYS" ]; then
       echo "error: --resolve-key cannot close a decision key of length ${#k}: its ${#probe_line}-character close record exceeds the $FM_LINE_CAP_DEFAULT-character status-line cap, and truncation would remove the structural key delimiter. Refusing rather than writing an ineffective close; nothing was sent." >&2
       exit 1
     fi
-  done
-fi
-
-if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [[ "$*" =~ (^|[[:space:]])no-mistakes[[:space:]]+axi[[:space:]]+respond([[:space:]]|$) ]]; then
-  for policy_key in $CAPTAIN_OPEN_NEEDS_KEYS; do
-    case " $RESOLVE_KEYS " in
-      *" $policy_key "*) ;;
-      *)
-        echo "error: no-mistakes gate response for open needs-decision key '$policy_key' requires --resolve-key '$policy_key'; nothing was sent" >&2
-        exit 1
-        ;;
-    esac
   done
 fi
 

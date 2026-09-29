@@ -790,34 +790,35 @@ test_missing_and_unreadable_inventory_holds_block_plain_steers() {
   pass "fm-send keeps missing and unreadable captain-held inventory decisions open"
 }
 
-test_no_mistakes_response_requires_the_open_decision_key() {
+test_uninventoried_answered_hold_cannot_be_relayed() {
   local dir fb log err home rc
-  dir="$TMP_ROOT/gate-bypass"; mkdir -p "$dir"
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for durable captain-hold compatibility)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/uninventoried-answered-hold"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
-  home=$(setup_home gate-bypass)
+  home=$(setup_home uninventoried-answered-hold)
   mkdir -p "$home/config"
   : > "$home/config/captain-decides-findings"
-  fm_write_meta "$home/state/tgate.meta" "window=sess:fm-tgate" "kind=ship"
-  printf 'needs-decision [key=review-choice]: review decision\n' \
-    > "$home/state/tgate.status"
+  fm_write_meta "$home/state/tnoinv.meta" "window=sess:fm-tnoinv" "kind=ship"
+  setup_captain_answer "$home" review 'Approve the unrelated review.'
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi 'done' review >/dev/null) \
+    || fail "could not close the unrelated answered task"
 
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
-    FM_SEND_SETTLE=0 "$SEND" tgate 'no-mistakes axi respond --action approve' \
-    >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "a no-mistakes response command bypassed an open needs-decision key"
-  assert_contains "$(cat "$err")" "requires --resolve-key 'review-choice'" \
-    "the gate-response refusal should name the required decision key"
-  [ ! -s "$log" ] || fail "a refused no-mistakes response command was typed"
-  [ ! -e "$home/state/tgate.inbox/001.msg" ] \
-    || fail "a refused no-mistakes response command reached the worker"
-
-  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
-    FM_SEND_SETTLE=0 "$SEND" tgate --resolve-key unrelated-choice \
-    'no-mistakes axi respond --action approve' >/dev/null 2>"$err"; rc=$?
-  [ "$rc" -ne 0 ] || fail "an unrelated resolve key bypassed the open gate decision"
-  [ ! -e "$home/state/tgate.inbox/001.msg" ] \
-    || fail "a response with the wrong resolve key reached the worker"
-  pass "fm-send requires the exact open key for a literal no-mistakes response command"
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tnoinv --resolve-key review \
+    --captain-answer review 'approve the review' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unrelated answered task authorized a decision this target never had"
+  assert_contains "$(cat "$err")" "no captain-held decision 'review' in this task's inventory" \
+    "the refusal should say the key is not this task's decision"
+  [ ! -s "$log" ] || fail "the uninventoried answer was typed"
+  [ ! -e "$home/state/tnoinv.inbox/001.msg" ] \
+    || fail "the uninventoried answer reached the worker"
+  if [ -f "$home/state/tnoinv.status" ] && grep -qF 'answered-key=review' "$home/state/tnoinv.status"; then
+    fail "an answered-key declaration was logged for a decision this target never had"
+  fi
+  pass "fm-send refuses captain answers for keys absent from status and inventory"
 }
 
 test_captain_answer_uses_authoritative_hold_identity() {
@@ -1819,7 +1820,7 @@ test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
 test_closed_unanswered_transferred_hold_still_gates_steers
 test_missing_and_unreadable_inventory_holds_block_plain_steers
-test_no_mistakes_response_requires_the_open_decision_key
+test_uninventoried_answered_hold_cannot_be_relayed
 test_captain_answer_uses_authoritative_hold_identity
 test_migrated_beads_hold_is_gated_and_uses_canonical_id
 test_legacy_declined_answer_can_be_relayed

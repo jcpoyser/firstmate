@@ -139,9 +139,8 @@ A missing or unreadable task, a closed task without an answer, or a migrated rec
 A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity.
 `answer-recorded` is a firstmate attestation, not proof that the captain authored the answer; the existing record store retains who wrote it and when.
 
-With the flag present, the literal `no-mistakes axi respond` command is also refused when the task has an open `needs-decision` key not named by `--resolve-key`.
-This guard recognizes the literal command form; aliases and wrappers are not inferred.
-Other steer wording is not inspected.
+A `--resolve-key` that names neither an open status key nor a decision in this task's inventory is refused, even when a same-named answered task exists.
+Steer wording is not inspected.
 The flag is local to this home and is not inherited by secondmate homes.
 When the flag is absent, send behavior is unchanged.
 
