@@ -653,25 +653,23 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 FM_SEND_AUTHORITATIVE_HOLD_ID=
 FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
 fm_send_authoritative_hold() {
-  local id rc
+  local resolved rc
   FM_SEND_AUTHORITATIVE_HOLD_ID=
   FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
-  for id in "$2" "$1-decision-$2"; do
-    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
-      "$SCRIPT_DIR/fm-captain-hold.sh" open "$id" --distinguish-absent >/dev/null 2>&1; then
-      FM_SEND_AUTHORITATIVE_HOLD_ID=$id
-      FM_SEND_AUTHORITATIVE_HOLD_OPEN=1
-      return 0
-    else
-      rc=$?
-      case "$rc" in
-        1) FM_SEND_AUTHORITATIVE_HOLD_ID=$id; return 0 ;;
-        3) : ;;
-        *) return "$rc" ;;
-      esac
-    fi
-  done
-  return 1
+  resolved=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" resolve-entry "$1" "$2" 2>/dev/null) || return $?
+  if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" open "$resolved" --distinguish-absent >/dev/null 2>&1; then
+    FM_SEND_AUTHORITATIVE_HOLD_OPEN=1
+  else
+    rc=$?
+    case "$rc" in
+      1) : ;;
+      *) return "$rc" ;;
+    esac
+  fi
+  FM_SEND_AUTHORITATIVE_HOLD_ID=$resolved
+  return 0
 }
 
 fm_send_hold_resolved_id() { # <task-id> <decision-key>

@@ -774,6 +774,95 @@ test_captain_answer_uses_authoritative_hold_identity() {
   pass "fm-send binds recorded answers to the exact-first authoritative hold identity"
 }
 
+test_migrated_beads_hold_is_gated_and_uses_canonical_id() {
+  local dir home graph beads fb log err scout key legacy canonical answer resolved rc
+  if ! command -v bd >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1 || ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (Beads migration relay requires bd, jq, and tasks-axi)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/migrated-beads-send"; home="$dir/home"; graph="$dir/fm"
+  mkdir -p "$home/data" "$home/config" "$home/state" "$graph"
+  git -C "$graph" init -q
+  if ! (cd "$graph" && bd init >"$dir/bd-init.log" 2>&1); then
+    printf 'ok - skipped (bd cannot initialize the Beads migration fixture)\n'
+    return 0
+  fi
+  beads="$graph/.beads"
+  cat > "$home/.tasks.toml" <<EOF
+backend = "beads"
+
+[beads]
+path = "$beads"
+binary = "bd"
+prefix = "fm"
+
+[markdown]
+path = "data/backlog.md"
+EOF
+  if ! (cd "$home" && tasks-axi list >/dev/null 2>&1); then
+    printf 'ok - skipped (tasks-axi does not support the Beads backend required for migration relay)\n'
+    return 0
+  fi
+
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  scout=sample-migrated-scout; key=github-delete
+  legacy="$scout-decision-$key"; canonical=fm-relocated-captain-call
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi add "$canonical" \
+    'Captain call moved during migration' --repo sample >/dev/null) \
+    || fail "could not create the migrated captain-held task"
+  (cd "$home" && BEADS_ACTOR=fixture tasks-axi hold "$canonical" --kind captain \
+    --reason 'captain must decide' >/dev/null) \
+    || fail "could not hold the migrated captain task"
+  BEADS_DIR="$beads" bd note "$canonical" \
+    "migrated from data/backlog.md id $legacy on 2026-09-04" >/dev/null \
+    || fail "could not record the legacy identity on the migrated task"
+  fm_write_meta "$home/state/$scout.meta" "window=sess:fm-$scout" "kind=ship"
+  printf 'needs-decision [key=%s]: choose whether to delete the repo\n' "$key" \
+    > "$home/state/$scout.status"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE='' \
+    "$CAPTAIN_HOLD" complete "$scout" "$key" >/dev/null \
+    || fail "complete did not transfer the migrated decision"
+  resolved=$(FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE='' \
+    "$CAPTAIN_HOLD" resolve-entry "$scout" "$key") \
+    || fail "the shared resolver did not resolve the migrated identity"
+  [ "$resolved" = "$canonical" ] \
+    || fail "the shared resolver returned '$resolved' instead of canonical task id '$canonical'"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_DATA_OVERRIDE='' \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" "$scout" 'routine progress' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an unresolved migrated captain hold failed to gate an ordinary steer"
+  assert_contains "$(cat "$err")" "open decision key(s) '$key'" \
+    "the migrated decision refusal should name its inventory key"
+  [ ! -e "$home/state/$scout.inbox/001.msg" ] \
+    || fail "an ordinary steer reached the worker despite the migrated hold"
+
+  answer="$home/data/captain-answer.txt"
+  printf 'Do not delete the repository.\n' > "$answer"
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE='' \
+    "$CAPTAIN_HOLD" answer "$canonical" --decision-file "$answer" >/dev/null \
+    || fail "could not record the answer on the canonical migrated task"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_DATA_OVERRIDE='' \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" "$scout" --resolve-key "$key" --captain-answer "$legacy" \
+    'Do not delete the repository.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "the legacy alias authorized an answer instead of the canonical migrated task"
+  [ ! -e "$home/state/$scout.inbox/001.msg" ] \
+    || fail "the legacy alias answer reached the worker"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_DATA_OVERRIDE='' \
+    FM_SEND_LOG="$log" FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 \
+    "$SEND" "$scout" --resolve-key "$key" --captain-answer "$canonical" \
+    'Do not delete the repository.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the canonical migrated answer should resolve its transferred decision: $(cat "$err")"
+  grep -qF 'Do not delete the repository.' "$home/state/$scout.inbox/001.msg" \
+    || fail "the canonical migrated captain answer did not reach the worker"
+  pass "fm-send gates migrated captain holds and authorizes their canonical task ids"
+}
+
 test_legacy_declined_answer_can_be_relayed() {
   local dir fb log err home hold_id decision digest body rc
   if ! command -v tasks-axi >/dev/null 2>&1; then
@@ -1621,6 +1710,7 @@ test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
 test_captain_answer_uses_authoritative_hold_identity
+test_migrated_beads_hold_is_gated_and_uses_canonical_id
 test_legacy_declined_answer_can_be_relayed
 test_answer_send_closes_open_decision
 test_answer_close_is_self_announced

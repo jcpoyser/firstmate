@@ -32,6 +32,7 @@
 #   fm-captain-hold.sh verify <origin-id>
 #   fm-captain-hold.sh open <task-id> [--identity] [--distinguish-absent]
 #   fm-captain-hold.sh answer-recorded <task-id>
+#   fm-captain-hold.sh resolve-entry <origin-id> <inventory-entry>
 #   fm-captain-hold.sh diverged
 #   fm-captain-hold.sh reconcile list
 #   fm-captain-hold.sh reconcile close <task-id> --evidence-file <path>
@@ -735,15 +736,21 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc
+  local origin=$1 entry=$2 legacy migrated rc show resolved
   if task_show "$entry"; then
-    printf '%s exact' "$entry"
+    show=$TASK_SHOW_OUTPUT
+    resolved=$(show_field "$show" id)
+    [ -n "$resolved" ] || fail "the backlog did not return a task id for $entry"
+    printf '%s exact' "$resolved"
     return 0
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
     if task_show "$legacy"; then
-      printf '%s legacy' "$legacy"
+      show=$TASK_SHOW_OUTPUT
+      resolved=$(show_field "$show" id)
+      [ -n "$resolved" ] || fail "the backlog did not return a task id for $legacy"
+      printf '%s legacy' "$resolved"
       return 0
     fi
   fi
@@ -759,6 +766,17 @@ resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
     fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA); the nearest legacy identity $legacy also resolves to nothing"
   fi
   fail "no captain-held task $entry and no migrated hold for it in this home's configured backlog (data directory $DATA)"
+}
+
+command_resolve_entry() {  # <origin-id> <inventory-entry>
+  local origin=${1:-} entry=${2:-} resolved resolve_rc=0
+  [ "$#" -eq 2 ] || { usage >&2; exit 2; }
+  validate_slug origin-id "$origin"
+  validate_slug inventory-entry "$entry"
+  require_tasks_axi
+  resolved=$(resolve_entry "$origin" "$entry") || resolve_rc=$?
+  [ "$resolve_rc" -eq 0 ] || return "$resolve_rc"
+  printf '%s\n' "${resolved%% *}"
 }
 
 body_hold_set_timestamp() {  # <decoded-task-body>
@@ -1963,6 +1981,7 @@ case "${1:-}" in
   verify) shift; command_verify "$@" ;;
   open) shift; command_open "$@" ;;
   answer-recorded) shift; command_answer_recorded "$@" ;;
+  resolve-entry) shift; command_resolve_entry "$@" ;;
   diverged) shift; command_diverged "$@" ;;
   reconcile) shift; command_reconcile "$@" ;;
   -h|--help) usage ;;
