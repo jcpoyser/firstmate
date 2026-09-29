@@ -26,6 +26,14 @@ WATCH="$ROOT/bin/fm-watch.sh"
 DRAIN="$ROOT/bin/fm-wake-drain.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
+# Watcher triage tests exercise wake delivery, not fleet-ledger publication.
+# Keep side-band home-summary work inside this fixture home and bound its
+# detached worker so a wake assertion cannot wait on a production-length refresh.
+FM_HOME="$TMP_ROOT/home"
+mkdir -p "$FM_HOME/state" "$FM_HOME/data" "$FM_HOME/config" "$FM_HOME/projects"
+export FM_HOME
+FM_HOME_SUMMARY_TIMEOUT=1
+export FM_HOME_SUMMARY_TIMEOUT
 
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
@@ -199,6 +207,8 @@ test_status_span_actionable_classifier() {
   printf 'working: x\nneeds-decision: pick A or B\n' > "$state/b.status"
   status_span_has_actionable "$state/b.status" 0 || fail "captain-relevant span classified benign"
   # A failure and a merge result are captain-relevant and must always wake.
+  printf 'blocked: dependency is unavailable\n' > "$state/c.status"
+  status_span_has_actionable "$state/c.status" 0 || fail "a blocked: line was not actionable"
   printf 'failed: build broke on main\n' > "$state/d.status"
   status_span_has_actionable "$state/d.status" 0 || fail "a failed: line was not actionable"
   printf 'merged\n' > "$state/e.status"
@@ -6603,6 +6613,138 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
+decision_pause_fixture() {  # <name> <status-age-secs>
+  local name=$1 age=$2 dir state statusf window key pane back
+  dir=$(make_case "$name"); state="$dir/state"
+  window='test:fm-until'; statusf="$state/until.status"; pane='idle, waiting on the captain'
+  printf '%s' "$pane" > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/until.meta"
+  printf 'alive\n' > "$dir/agent-state"
+  cat > "$dir/fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows) printf '%s\n' fm-until ;;
+  capture-pane) cat "$FM_FAKE_TMUX_CAPTURE" ;;
+  display-message)
+    case "$*" in
+      *pane_tty*) printf '%s\n' /dev/pts/fm-fake-agent ;;
+      *pane_current_command*) printf '%s\n' '' ;;
+    esac
+    ;;
+esac
+SH
+  cat > "$dir/fakebin/ps" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = -t ] && [ "${2:-}" = pts/fm-fake-agent ]; then
+  printf '%s\n' "$*" >> "${FM_FAKE_TMUX_AGENT_STATE}.probe-log"
+  case "$(cat "${FM_FAKE_TMUX_AGENT_STATE:-}" 2>/dev/null || echo alive)" in
+    alive) printf '4242 4242 4242 pi\n' ;;
+    stopped) printf '4242 4242 4242 zsh\n' ;;
+  esac
+  exit 0
+fi
+if [ "${1:-}" = -p ] && [ "${2:-}" = 4242 ]; then
+  if [ "$(cat "${FM_FAKE_TMUX_AGENT_STATE:-}" 2>/dev/null || echo alive)" = alive ]; then
+    printf '%s\n' /usr/local/bin/pi
+  else
+    printf '%s\n' /bin/zsh
+  fi
+  exit 0
+fi
+exec /bin/ps "$@"
+SH
+  chmod +x "$dir/fakebin/tmux" "$dir/fakebin/ps"
+  printf 'needs-decision [key=choice]: choose a release target\npaused: waiting for the captain\n' > "$statusf"
+  back=$(( $(date +%s) - age ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  key=$(printf '%s' "$window" | tr '.:/' '___')
+  printf '%s' "$(hash_text "$pane")" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  printf '%s' "$(hash_text "$pane")" > "$state/.stale-$key"
+  mkdir -p "$dir/config"
+  printf '%s\n' "$dir"
+}
+
+test_open_decision_declared_pause_recheck_is_suppressed_until_change() {
+  local dir state out open
+  dir=$(decision_pause_fixture open-decision-pause 10); state="$dir/state"; out="$dir/watch.out"
+  open=$(status_open_decisions "$state/until.status")
+  printf '%s\n' "$open" | grep -F $'choice\tneeds-decision\tchoose a release target' >/dev/null \
+    || fail "the fixture did not retain the open decision"
+
+  # The initial decision is still delivered to main and records the exact state
+  # that was presented before any declared-wait recheck can be suppressed.
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "the initial open decision did not wake main: $(cat "$out")"; }
+  grep -F 'signal:' "$out" >/dev/null \
+    || fail "the initial open decision did not surface as a status signal: $(cat "$out")"
+  grep -F $'\tsignal\tuntil.status\tneeds-decision:' "$state/.wake-queue" >/dev/null \
+    || fail "the initial decision signal was not marked main-owned: $(cat "$state/.wake-queue")"
+  [ ! -s "$dir/agent-state.probe-log" ] \
+    || fail "the initial decision signal probed endpoint liveness before delivery"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the initial decision signal"
+
+  # Re-arm against the unchanged, already-presented open set. The long-cadence
+  # declared-pause check must be absorbed without a stale row or watcher exit.
+  : > "$out"
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unchanged open decision re-woke main: $(cat "$out")"
+  fi
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 0 ] \
+    || { reap "$UNTIL_PID"; fail "an unchanged open decision queued a repeat stale row: $(cat "$state/.wake-queue")"; }
+  [ -s "$dir/agent-state.probe-log" ] \
+    || { reap "$UNTIL_PID"; fail "the due recheck was suppressed without probing for positive live-endpoint evidence"; }
+
+  # A distinct new decision remains actionable even while the prior decision's
+  # repeated wait is suppressed.
+  printf 'needs-decision [key=alternate]: choose a different release target\n' >> "$state/until.status"
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "a changed decision did not wake main: $(cat "$out")"; }
+  grep -F $'\tsignal\tuntil.status\tneeds-decision:' "$state/.wake-queue" >/dev/null \
+    || fail "the changed decision signal was not marked main-owned: $(cat "$state/.wake-queue")"
+  pass "an unchanged declared pause with an already-presented open decision stays quiet, while a changed decision still wakes main"
+}
+
+test_open_decision_recheck_surfaces_when_endpoint_stops() {
+  local dir state out key
+  dir=$(decision_pause_fixture stopped-decision-endpoint 10); state="$dir/state"; out="$dir/watch.out"
+  key=$(printf '%s' 'test:fm-until' | tr '.:/' '___')
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "the initial live open decision did not wake main: $(cat "$out")"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the initial decision signal"
+
+  # A dead endpoint is never treated as an unchanged quiet wait, even when the
+  # status and open-decision set have not changed since the captain was notified.
+  printf 'stopped\n' > "$dir/agent-state"
+  : > "$out"
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "the stopped endpoint did not resurface the decision wait: $(cat "$out")"; }
+  [ -s "$dir/agent-state.probe-log" ] \
+    || fail "the stopped endpoint was not probed before deciding whether to suppress the recheck"
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 1 ] \
+    || fail "the stopped endpoint did not queue its recheck: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the stopped-endpoint recheck"
+
+  # An unreadable endpoint is not positive live evidence either; uncertainty must
+  # remain visible rather than borrowing the previous successful snapshot.
+  printf 'unknown\n' > "$dir/agent-state"
+  rm -f "$state/.paused-resurfaced-$key"
+  : > "$out"
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "an unclassifiable endpoint did not resurface the decision wait: $(cat "$out")"; }
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 1 ] \
+    || fail "an unclassifiable endpoint did not queue its recheck: $(cat "$state/.wake-queue")"
+  pass "an open-decision recheck stays actionable when its endpoint stops or cannot be classified"
+}
+
 # CI's stock macOS Bash lane sets FM_TEST_ONLY to run just the bash-3.2
 # churn-deferral regression. The rest of this file is not a 3.2 snapshot suite.
 if [ -n "${FM_TEST_ONLY:-}" ]; then
@@ -6751,3 +6893,5 @@ test_captain_held_rechecked_under_a_quiet_record
 test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
+test_open_decision_declared_pause_recheck_is_suppressed_until_change
+test_open_decision_recheck_surfaces_when_endpoint_stops

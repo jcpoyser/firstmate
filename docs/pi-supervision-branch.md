@@ -126,6 +126,12 @@ For a stale row, `scopeForUnreadWake` folds the mapped task's status log.
 It excludes the row when any `needs-decision` remains open or the current meaningful declaration is `captain-held`.
 An unreadable or symlinked status log fails the scope closed rather than influencing routing.
 
+The initial status signal that presents an open decision remains main-owned.
+After that signal is queued, the watcher records the task's full status signature, latest status line, and open-decision set without probing endpoint liveness.
+A later declared-wait recheck does not enqueue another stale row only when that snapshot still matches and the endpoint is positively live.
+Any new status append or changed open-decision set keeps the ordinary signal path, and a stopped or unclassifiable endpoint keeps the recheck actionable.
+Secondmate endpoint checks use their existing liveness probe, and the away-mode daemon is unchanged.
+
 Before cross-referencing them, the dispatcher resolves trigger keys and every currently unread excluded decision row to task identity.
 The cross-reference then applies two rules:
 
