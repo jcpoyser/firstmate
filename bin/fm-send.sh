@@ -678,6 +678,11 @@ fm_send_hold_resolved_id() { # <task-id> <decision-key>
   printf '%s\n' "$FM_SEND_AUTHORITATIVE_HOLD_ID"
 }
 
+fm_send_captain_answer_recorded() { # <task-id>
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$1" >/dev/null
+}
+
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; then
   local_inventory_keys=()
   IFS=, read -r -a local_inventory_keys <<< "$CAPTAIN_POLICY_INVENTORY"
@@ -689,9 +694,21 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; th
         ;;
     esac
     held_rc=0
-    fm_send_hold_resolved_id "$CAPTAIN_POLICY_TASK_ID" "$inventory_key" >/dev/null || held_rc=$?
+    fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$inventory_key" || held_rc=$?
     case "$held_rc" in
-      0) CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$inventory_key" ;;
+      0)
+        if [ "$FM_SEND_AUTHORITATIVE_HOLD_OPEN" = 1 ]; then
+          CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$inventory_key"
+        else
+          answer_rc=0
+          fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
+          case "$answer_rc" in
+            0) : ;;
+            1) CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$inventory_key" ;;
+            *) echo "error: cannot verify recorded captain answer for '$inventory_key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
+          esac
+        fi
+        ;;
       1) : ;;
       *) echo "error: cannot verify captain-held decision '$inventory_key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
     esac
@@ -703,11 +720,6 @@ if [ -n "$CAPTAIN_OPEN_HELD_KEYS" ]; then
 fi
 
 FM_SEND_MATCHED_CAPTAIN_ANSWER=
-fm_send_captain_answer_recorded() { # <task-id>
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
-    "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$1" >/dev/null
-}
-
 fm_send_captain_answer_for_key() { # <decision-key>
   local candidate
   FM_SEND_MATCHED_CAPTAIN_ANSWER=

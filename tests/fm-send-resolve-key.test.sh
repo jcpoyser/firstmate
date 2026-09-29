@@ -712,6 +712,36 @@ test_transferred_held_decision_requires_its_recorded_answer() {
   pass "fm-send gates transferred holds on their own recorded captain answer"
 }
 
+test_closed_unanswered_transferred_hold_still_gates_steers() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for durable captain-hold compatibility)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/closed-unanswered-transferred-hold"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home closed-unanswered-transferred-hold)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tclosed.meta" "window=sess:fm-tclosed" "kind=ship"
+  printf 'needs-decision [key=closed-choice]: choose a route\n' > "$home/state/tclosed.status"
+  setup_captain_hold "$home" closed-choice
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" complete tclosed closed-choice >/dev/null
+  (cd "$home" && FM_TASKS_AXI_COMPATIBLE=1 tasks-axi done closed-choice >/dev/null) \
+    || fail "could not close the transferred hold without recording an answer"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tclosed 'routine progress' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an ordinary steer bypassed a closed transferred hold without an answer"
+  assert_contains "$(cat "$err")" "open decision key(s) 'closed-choice'" \
+    "the refusal should identify the unanswered transferred decision"
+  [ ! -e "$home/state/tclosed.inbox/001.msg" ] \
+    || fail "the ordinary steer reached the worker despite an unanswered transferred hold"
+  pass "fm-send keeps closed unanswered transferred decisions in the captain gate"
+}
+
 test_captain_answer_uses_authoritative_hold_identity() {
   local dir fb home log err rc
   if ! command -v tasks-axi >/dev/null 2>&1; then
@@ -1709,6 +1739,7 @@ test_no_decision_declaration_precedes_later_close_failure
 test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
+test_closed_unanswered_transferred_hold_still_gates_steers
 test_captain_answer_uses_authoritative_hold_identity
 test_migrated_beads_hold_is_gated_and_uses_canonical_id
 test_legacy_declined_answer_can_be_relayed
