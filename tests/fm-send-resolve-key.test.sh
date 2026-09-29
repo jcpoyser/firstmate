@@ -798,7 +798,7 @@ test_no_mistakes_response_requires_the_open_decision_key() {
   mkdir -p "$home/config"
   : > "$home/config/captain-decides-findings"
   fm_write_meta "$home/state/tgate.meta" "window=sess:fm-tgate" "kind=ship"
-  printf 'needs-decision [key=review-choice]: review decision\\n' \
+  printf 'needs-decision [key=review-choice]: review decision\n' \
     > "$home/state/tgate.status"
 
   env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
