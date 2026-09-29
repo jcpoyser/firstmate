@@ -203,6 +203,20 @@ test_legacy_unterminated_record_body_remains_readable() {
   pass "inbox: legacy records without a record terminator remain byte-readable"
 }
 
+test_truncated_body_bytes_are_refused_without_partial_output() {
+  local state rec actual rc
+  state="$TMP_ROOT/truncated-body/state"
+  mkdir -p "$state/t1.inbox"
+  rec="$state/t1.inbox/001.msg"
+  printf 'schema=fm-task-inbox.v1\nat=2026-09-28T00:00:00Z\nbody-bytes=12\n--\nshort' > "$rec"
+  actual="$state/actual.body"
+  rc=0
+  inbox_lib "$state" fm_task_inbox_body "$rec" > "$actual" || rc=$?
+  [ "$rc" -ne 0 ] || fail "a body shorter than its recorded byte count must fail"
+  [ ! -s "$actual" ] || fail "a truncated body must not emit partial message content"
+  pass "inbox: truncated body-byte records fail without exposing partial message content"
+}
+
 test_doorbell_is_a_shell_noop() {
   local state rec doorbell sh out before after marker
   state="$TMP_ROOT/noop/x; touch marker; #'s space/state"
@@ -823,6 +837,7 @@ test_watcher_dead_pane_ignores_stale_busy_state() {
 
 test_write_is_durable_and_exact
 test_legacy_unterminated_record_body_remains_readable
+test_truncated_body_bytes_are_refused_without_partial_output
 test_doorbell_is_a_shell_noop
 test_doorbell_rejects_terminal_controls
 test_ring_skips_dead_agent

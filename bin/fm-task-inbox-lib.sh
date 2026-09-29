@@ -244,16 +244,24 @@ fm_task_inbox_write_idempotent() {  # <state-dir> <task-id> <text> [delivery-mod
 
 # The exact enqueued text back out of a record.
 fm_task_inbox_body() {  # <record-path>
-  local line body_bytes=''
+  local line body_bytes='' has_body_bytes=0 body LC_ALL=C
   [ -f "$1" ] || return 1
   while IFS= read -r line; do
     case "$line" in
-      body-bytes=*) body_bytes=${line#body-bytes=} ;;
+      body-bytes=*) body_bytes=${line#body-bytes=}; has_body_bytes=1 ;;
       --)
+        if [ "$has_body_bytes" -eq 0 ]; then
+          cat
+          return 0
+        fi
         case "$body_bytes" in
-          ''|*[!0-9]*) cat ;;
-          *) head -c "$body_bytes" ;;
+          0|[1-9]|[1-9][0-9]*) ;;
+          *) return 1 ;;
         esac
+        body=$(head -c "$body_bytes"; printf '\001') || return 1
+        body=${body%$'\001'}
+        [ "${#body}" = "$body_bytes" ] || return 1
+        printf '%s' "$body"
         return 0
         ;;
     esac
