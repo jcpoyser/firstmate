@@ -6613,13 +6613,14 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
-decision_pause_fixture() {  # <name> <status-age-secs> [<decision-line>] [<wait-line>]
+decision_pause_fixture() {  # <name> <status-age-secs> [<decision-line>] [<wait-line>] [<kind>]
   local name=$1 age=$2 decision=${3:-'needs-decision [key=choice]: choose a release target'}
-  local wait_line=${4:-'paused: waiting for the captain'} dir state statusf window key pane back
+  local wait_line=${4:-'paused: waiting for the captain'} kind=${5:-ship} dir state statusf window key pane back
   dir=$(make_case "$name"); state="$dir/state"
   window='test:fm-until'; statusf="$state/until.status"; pane='idle, waiting on the captain'
   printf '%s' "$pane" > "$dir/pane.txt"
-  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/until.meta"
+  printf 'window=%s\nkind=%s\nbackend=tmux\n' "$window" "$kind" > "$state/until.meta"
+  [ "$kind" != secondmate ] || printf 'harness=pi\n' >> "$state/until.meta"
   printf 'alive\n' > "$dir/agent-state"
   cat > "$dir/fakebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -6739,6 +6740,44 @@ test_pending_reply_declared_pause_recheck_is_suppressed() {
     || { reap "$UNTIL_PID"; fail "an unchanged pending-reply decision queued a repeat stale row: $(cat "$state/.wake-queue")"; }
   reap "$UNTIL_PID"
   pass "an unchanged surfaced pending-reply decision stays quiet on declared-wait rechecks"
+}
+
+test_secondmate_open_decision_recheck_requires_positive_liveness() {
+  local dir state out
+  dir=$(decision_pause_fixture alive-secondmate-decision 10 \
+    'needs-decision [key=choice]: choose a release target' 'paused: waiting for the captain' secondmate)
+  state="$dir/state"; out="$dir/watch.out"
+
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 300 \
+    || { reap "$UNTIL_PID"; fail "the initial secondmate decision did not wake main: $(cat "$out")"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the initial secondmate decision"
+
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an alive secondmate's unchanged decision re-woke main: $(cat "$out")"
+  fi
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 0 ] \
+    || { reap "$UNTIL_PID"; fail "an alive secondmate queued a repeat stale row: $(cat "$state/.wake-queue")"; }
+  [ -s "$dir/agent-state.probe-log" ] \
+    || { reap "$UNTIL_PID"; fail "the secondmate recheck was suppressed without a liveness probe"; }
+  reap "$UNTIL_PID"
+
+  dir=$(decision_pause_fixture unknown-secondmate-decision 10 \
+    'needs-decision [key=choice]: choose a release target' 'paused: waiting for the captain' secondmate)
+  state="$dir/state"; out="$dir/watch.out"
+  printf 'unknown\n' > "$dir/agent-state"
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 300 \
+    || { reap "$UNTIL_PID"; fail "the initial unclassifiable secondmate decision did not wake main: $(cat "$out")"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the initial unclassifiable secondmate decision"
+
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "an unclassifiable secondmate endpoint suppressed its recheck: $(cat "$out")"; }
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 1 ] \
+    || fail "the unclassifiable secondmate did not queue its stale recheck: $(cat "$state/.wake-queue")"
+  pass "an unchanged secondmate decision stays quiet only with positive alive evidence"
 }
 
 test_due_open_decision_declared_pause_surfaces() {
@@ -6946,6 +6985,7 @@ test_paused_until_near_future_is_quiet_before_the_cadence
 test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
 test_open_decision_declared_pause_recheck_is_suppressed_until_change
+test_secondmate_open_decision_recheck_requires_positive_liveness
 test_open_decision_recheck_surfaces_when_endpoint_stops
 test_pending_reply_declared_pause_recheck_is_suppressed
 test_due_open_decision_declared_pause_surfaces
