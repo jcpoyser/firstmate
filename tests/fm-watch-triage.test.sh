@@ -6613,8 +6613,9 @@ test_paused_until_that_passed_is_rechecked_before_the_cadence() {
   pass "a declared wait whose until time has passed is rechecked at once, then held to the cadence"
 }
 
-decision_pause_fixture() {  # <name> <status-age-secs>
-  local name=$1 age=$2 dir state statusf window key pane back
+decision_pause_fixture() {  # <name> <status-age-secs> [<decision-line>] [<wait-line>]
+  local name=$1 age=$2 decision=${3:-'needs-decision [key=choice]: choose a release target'}
+  local wait_line=${4:-'paused: waiting for the captain'} dir state statusf window key pane back
   dir=$(make_case "$name"); state="$dir/state"
   window='test:fm-until'; statusf="$state/until.status"; pane='idle, waiting on the captain'
   printf '%s' "$pane" > "$dir/pane.txt"
@@ -6656,7 +6657,7 @@ fi
 exec /bin/ps "$@"
 SH
   chmod +x "$dir/fakebin/tmux" "$dir/fakebin/ps"
-  printf 'needs-decision [key=choice]: choose a release target\npaused: waiting for the captain\n' > "$statusf"
+  printf '%s\n%s\n' "$decision" "$wait_line" > "$statusf"
   back=$(( $(date +%s) - age ))
   if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
   else touch -m -d "@$back" "$statusf"; fi
@@ -6712,6 +6713,53 @@ test_open_decision_declared_pause_recheck_is_suppressed_until_change() {
   grep -F $'\tsignal\tuntil.status\tneeds-decision:' "$state/.wake-queue" >/dev/null \
     || fail "the changed decision signal was not marked main-owned: $(cat "$state/.wake-queue")"
   pass "an unchanged declared pause with an already-presented open decision stays quiet, while a changed decision still wakes main"
+}
+
+test_pending_reply_declared_pause_recheck_is_suppressed() {
+  local dir state out open
+  dir=$(decision_pause_fixture pending-reply-pause 10 \
+    'blocked [key=pending-reply-0123456789abcdef]: pending-reply-missed: task=until pending-reply-id=0123456789abcdef request=finish report')
+  state="$dir/state"; out="$dir/watch.out"
+  open=$(status_open_decisions "$state/until.status")
+  printf '%s\n' "$open" | grep -F $'pending-reply-0123456789abcdef\tblocked\tpending-reply-missed:' >/dev/null \
+    || fail "the fixture did not retain the pending-reply decision"
+
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 300 \
+    || { reap "$UNTIL_PID"; fail "the initial pending-reply decision did not wake main: $(cat "$out")"; }
+  grep -F "$(printf 'signal\tuntil.status\tneeds-decision:')" "$state/.wake-queue" >/dev/null \
+    || fail "the pending-reply decision was not presented to main: $(cat "$state/.wake-queue")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the pending-reply signal"
+
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  if ! wait_poll_cycle "$state" "$UNTIL_PID" || ! wait_poll_cycle "$state" "$UNTIL_PID"; then
+    reap "$UNTIL_PID"; fail "an unchanged pending-reply decision re-woke main: $(cat "$out")"
+  fi
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 0 ] \
+    || { reap "$UNTIL_PID"; fail "an unchanged pending-reply decision queued a repeat stale row: $(cat "$state/.wake-queue")"; }
+  reap "$UNTIL_PID"
+  pass "an unchanged surfaced pending-reply decision stays quiet on declared-wait rechecks"
+}
+
+test_due_open_decision_declared_pause_surfaces() {
+  local dir state out past
+  past=$(iso_utc_at "$(( $(date +%s) - 30 ))")
+  dir=$(decision_pause_fixture due-open-decision 10 \
+    'needs-decision [key=choice]: choose a release target' "paused: waiting for the captain until $past")
+  state="$dir/state"; out="$dir/watch.out"
+
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 300 \
+    || { reap "$UNTIL_PID"; fail "the initial open decision did not wake main: $(cat "$out")"; }
+  ack_stopped_cycle "$state" || fail "could not acknowledge the initial decision signal"
+
+  : > "$out"
+  FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
+  wait_for_exit "$UNTIL_PID" 100 \
+    || { reap "$UNTIL_PID"; fail "the due declared wait was hidden behind the prior decision: $(cat "$out")"; }
+  [ "$(wedge_stale_wakes "$state" 'test:fm-until')" -eq 1 ] \
+    || fail "the due declared wait did not queue its stale recheck: $(cat "$state/.wake-queue")"
+  pass "a declared-wait recheck surfaces when its due time passes despite an unchanged decision"
 }
 
 test_open_decision_recheck_surfaces_when_endpoint_stops() {
@@ -6899,3 +6947,5 @@ test_paused_until_wrong_year_is_bounded_by_the_cadence
 test_paused_until_that_passed_is_rechecked_before_the_cadence
 test_open_decision_declared_pause_recheck_is_suppressed_until_change
 test_open_decision_recheck_surfaces_when_endpoint_stops
+test_pending_reply_declared_pause_recheck_is_suppressed
+test_due_open_decision_declared_pause_surfaces

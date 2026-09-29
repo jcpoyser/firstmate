@@ -1159,12 +1159,17 @@ resurface_absorbed() {  # <window> <throttle-marker> <age> <reason> [scope] [min
     decision_identity=$(status_decision_presentation_identity "$STATE/$decision_task.status" || true)
     if [ -n "$decision_identity" ]; then
       decision_marker="$STATE/.decision-presented-$(window_key "$win")"
-      if [ "$(cat "$decision_marker" 2>/dev/null || true)" = "$decision_identity" ] \
-        && decision_presentation_endpoint_live "$STATE/$decision_task.status"; then
-        if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
-        triage_log "absorbed unchanged declared-wait recheck for an already-presented open decision: $win"
-        return 0
-      fi
+      case "$scope" in
+        *:due) ;;
+        *)
+          if [ "$(cat "$decision_marker" 2>/dev/null || true)" = "$decision_identity" ] \
+            && decision_presentation_endpoint_live "$STATE/$decision_task.status"; then
+            if [ -n "$scope" ]; then printf '%s' "$scope" > "$throttle"; else date +%s > "$throttle"; fi
+            triage_log "absorbed unchanged declared-wait recheck for an already-presented open decision: $win"
+            return 0
+          fi
+          ;;
+      esac
     fi
   fi
   fm_wake_append stale "$win" "$reason" || exit 1
@@ -1853,7 +1858,10 @@ status_decision_presentation_identity() {  # <status-file> [<expected-signature>
   [ -z "$expected" ] || [ "$before" = "$expected" ] || return 1
   open=$(status_open_decisions "$statusf") || return 1
   while IFS=$(printf '\t') read -r key verb summary; do
-    [ "$verb" = needs-decision ] && has_decision=1
+    case "$verb" in
+      needs-decision) has_decision=1 ;;
+      blocked) _fm_is_pending_reply_escalation "$key" "$summary" && has_decision=1 ;;
+    esac
   done <<EOF
 $open
 EOF
