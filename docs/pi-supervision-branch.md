@@ -129,6 +129,7 @@ An unreadable or symlinked status log fails the scope closed rather than influen
 The initial status signal that presents an open decision remains main-owned.
 After that signal is queued, the watcher records the task's full status signature, latest status line, and open-decision set without probing endpoint liveness.
 A later declared-wait recheck does not enqueue another stale row only when that snapshot still matches and the endpoint is positively live.
+A recheck whose declared `until` time has arrived remains actionable even when the snapshot is unchanged.
 Any new status append or changed open-decision set keeps the ordinary signal path, and a stopped or unclassifiable endpoint keeps the recheck actionable.
 Secondmate endpoint checks use their existing liveness probe, and the away-mode daemon is unchanged.
 
@@ -696,6 +697,7 @@ Other tests remain where they were:
 - Needs-decision, no-verb captain-held, and pending-reply second-mate escalation signal rows are marked `needs-decision:`.
 - A needs-decision whose key transition was rejected by the reserved-key vocabulary (`fm-classify-lib.sh`'s `reconciliation-required:` wrapper) is still marked.
 - Ordinary blocked or captain-relevant signals stay unmarked.
+- Unchanged surfaced open and pending-reply decisions stay quiet on declared-wait rechecks, while due-time rechecks and stopped or unclassifiable endpoints remain actionable.
 
 ### Live guards
 
