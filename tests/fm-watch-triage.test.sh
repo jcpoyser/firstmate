@@ -6668,6 +6668,10 @@ SH
   printf '%s\n' "$dir"
 }
 
+# Initial-decision delivery includes the watcher's bounded startup pass. Give
+# that first notification 30 seconds under a loaded runner; the old 10-second
+# harness deadline could kill a still-running watcher before it reached signal
+# scanning, as reproduced on unchanged code as well as the feature branch.
 test_open_decision_declared_pause_recheck_is_suppressed_until_change() {
   local dir state out open
   dir=$(decision_pause_fixture open-decision-pause 10); state="$dir/state"; out="$dir/watch.out"
@@ -6678,7 +6682,7 @@ test_open_decision_declared_pause_recheck_is_suppressed_until_change() {
   # The initial decision is still delivered to main and records the exact state
   # that was presented before any declared-wait recheck can be suppressed.
   FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
-  wait_for_exit "$UNTIL_PID" 100 \
+  wait_for_exit "$UNTIL_PID" 300 \
     || { reap "$UNTIL_PID"; fail "the initial open decision did not wake main: $(cat "$out")"; }
   grep -F 'signal:' "$out" >/dev/null \
     || fail "the initial open decision did not surface as a status signal: $(cat "$out")"
@@ -6715,7 +6719,7 @@ test_open_decision_recheck_surfaces_when_endpoint_stops() {
   dir=$(decision_pause_fixture stopped-decision-endpoint 10); state="$dir/state"; out="$dir/watch.out"
   key=$(printf '%s' 'test:fm-until' | tr '.:/' '___')
   FM_FAKE_TMUX_AGENT_STATE="$dir/agent-state" until_watch "$dir" 1
-  wait_for_exit "$UNTIL_PID" 100 \
+  wait_for_exit "$UNTIL_PID" 300 \
     || { reap "$UNTIL_PID"; fail "the initial live open decision did not wake main: $(cat "$out")"; }
   ack_stopped_cycle "$state" || fail "could not acknowledge the initial decision signal"
 
