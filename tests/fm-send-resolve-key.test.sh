@@ -821,6 +821,94 @@ test_uninventoried_answered_hold_cannot_be_relayed() {
   pass "fm-send refuses captain answers for keys absent from status and inventory"
 }
 
+test_self_resolved_decision_still_gates_steers() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for durable captain-hold compatibility)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/self-resolved-decision"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home self-resolved-decision)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tself.meta" "window=sess:fm-tself" "kind=ship"
+  printf 'needs-decision [key=review]: approve the findings?\nresolved [key=review]: approved them myself\n' \
+    > "$home/state/tself.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tself 'approve every other finding' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a worker self-resolve cleared a decision without a captain answer"
+  assert_contains "$(cat "$err")" "open decision key(s) 'review'" \
+    "the self-resolved decision should remain open"
+  [ ! -e "$home/state/tself.inbox/001.msg" ] || fail "a steer reached the worker after a self-resolve"
+
+  setup_captain_answer "$home" review 'Approve only R1.'
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tself --resolve-key review \
+    --captain-answer review 'Approve only R1.' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the recorded captain answer should settle the self-resolved decision: $(cat "$err")"
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tself 'routine progress' \
+    >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "a plain steer should pass once the decision was answered: $(cat "$err")"
+  pass "fm-send keeps a worker-resolved decision open until its captain answer is relayed"
+}
+
+test_terminal_status_does_not_settle_decisions() {
+  local dir fb log err home rc verb
+  dir="$TMP_ROOT/terminal-cleared-decision"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  for verb in done failed; do
+    home=$(setup_home "terminal-$verb")
+    mkdir -p "$home/config"
+    : > "$home/config/captain-decides-findings"
+    fm_write_meta "$home/state/tterm.meta" "window=sess:fm-tterm" "kind=ship"
+    printf 'needs-decision [key=gate-choice]: approve the gate?\n%s: finished\n' "$verb" \
+      > "$home/state/tterm.status"
+    env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+      FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tterm 'approve it' \
+      >/dev/null 2>"$err"; rc=$?
+    [ "$rc" -ne 0 ] || fail "a $verb: line cleared a decision without a captain answer"
+    assert_contains "$(cat "$err")" "open decision key(s) 'gate-choice'" \
+      "the decision cleared by $verb: should remain open"
+    [ ! -e "$home/state/tterm.inbox/001.msg" ] || fail "a steer reached the worker after $verb:"
+  done
+  pass "fm-send keeps decisions cleared by done:/failed: open for the captain"
+}
+
+test_partial_inventory_transfer_still_gates_omitted_key() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for durable captain-hold compatibility)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/partial-inventory-transfer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home partial-inventory-transfer)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tpart.meta" "window=sess:fm-tpart" "kind=ship"
+  printf 'needs-decision [key=first-choice]: first\nneeds-decision [key=second-choice]: second\n' \
+    > "$home/state/tpart.status"
+  setup_captain_answer "$home" first-choice 'Take the first route.'
+  FM_TASKS_AXI_COMPATIBLE=1 FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
+    "$CAPTAIN_HOLD" complete tpart first-choice >/dev/null 2>&1 || true
+  grep -q '^captain-held.*\[key=second-choice\]' "$home/state/tpart.status" \
+    || fail "fixture: complete did not transfer the omitted key: $(cat "$home/state/tpart.status")"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tpart 'routine progress' \
+    >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a key omitted from the transfer inventory was treated as settled"
+  assert_contains "$(cat "$err")" "second-choice" \
+    "the refusal should name the omitted decision key"
+  [ ! -e "$home/state/tpart.inbox/001.msg" ] \
+    || fail "a steer reached the worker despite the omitted unanswered decision"
+  pass "fm-send gates a decision a partial captain-hold transfer left out of the inventory"
+}
+
 test_captain_answer_uses_authoritative_hold_identity() {
   local dir fb home log err rc
   if ! command -v tasks-axi >/dev/null 2>&1; then
@@ -1821,6 +1909,9 @@ test_transferred_held_decision_requires_its_recorded_answer
 test_closed_unanswered_transferred_hold_still_gates_steers
 test_missing_and_unreadable_inventory_holds_block_plain_steers
 test_uninventoried_answered_hold_cannot_be_relayed
+test_self_resolved_decision_still_gates_steers
+test_terminal_status_does_not_settle_decisions
+test_partial_inventory_transfer_still_gates_omitted_key
 test_captain_answer_uses_authoritative_hold_identity
 test_migrated_beads_hold_is_gated_and_uses_canonical_id
 test_legacy_declined_answer_can_be_relayed

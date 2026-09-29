@@ -136,7 +136,8 @@ Use `--no-decision` only for a steer that does not answer any open decision; it 
 
 Every inventory entry stays open unless its exact authoritative task record proves a current answer.
 A missing or unreadable task, a closed task without an answer, or a migrated record that cannot be authoritatively resolved all block plain steers; uncertainty is not treated as an empty inventory.
-A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity.
+A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity; for a migrated hold, pass the canonical task id that `bin/fm-captain-hold.sh resolve-entry <target> <key>` prints.
+A `needs-decision` key that later leaves the status fold without a captain answer (a worker `resolved`, `done`, or `failed` line, or a captain-hold transfer that omitted it from the inventory) stays open until its captain-held task records an answer or fm-send logs its answered-key declaration.
 `answer-recorded` is a firstmate attestation, not proof that the captain authored the answer; the existing record store retains who wrote it and when.
 
 A `--resolve-key` that names neither an open status key nor a decision in this task's inventory is refused, even when a same-named answered task exists.

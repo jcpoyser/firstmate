@@ -212,9 +212,11 @@
 # its key with --resolve-key and matching --captain-answer <task-id>; a send
 # answering none must use --no-decision. Missing, unreadable, closed-unanswered,
 # and unresolved migrated inventory records remain open and block an unmarked
-# steer. A --resolve-key naming neither an open status key nor an inventory
-# decision is refused. Answered keys and no-decision
-# declarations are recorded in the task status. The answer-record check is a
+# steer, as does a needs-decision key that left the status fold without an
+# answered-key declaration or a recorded captain answer. A --resolve-key naming
+# neither an open status key nor an open or inventoried captain decision is
+# refused. Answered keys and no-decision declarations are recorded in the task
+# status. The answer-record check is a
 # firstmate attestation, not proof of captain authorship. These checks apply to
 # task metadata reached through a selector or matching explicit endpoint,
 # before local enqueue or remote transport.
@@ -692,6 +694,27 @@ fm_send_add_open_held_key() {
   esac
 }
 
+fm_send_gate_held_key() { # <decision-key>
+  local key=$1 held_rc=0 answer_rc=0
+  fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$key" || held_rc=$?
+  case "$held_rc" in
+    0)
+      if [ "$FM_SEND_AUTHORITATIVE_HOLD_OPEN" = 1 ]; then
+        fm_send_add_open_held_key "$key"
+      else
+        fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
+        case "$answer_rc" in
+          0) : ;;
+          1) fm_send_add_open_held_key "$key" ;;
+          *) echo "error: cannot verify recorded captain answer for '$key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
+        esac
+      fi
+      ;;
+    1) fm_send_add_open_held_key "$key" ;;
+    *) echo "error: cannot verify captain-held decision '$key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
+  esac
+}
+
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; then
   local_inventory_keys=()
   IFS=, read -r -a local_inventory_keys <<< "$CAPTAIN_POLICY_INVENTORY"
@@ -702,25 +725,41 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; th
         exit 1
         ;;
     esac
-    held_rc=0
-    fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$inventory_key" || held_rc=$?
-    case "$held_rc" in
-      0)
-        if [ "$FM_SEND_AUTHORITATIVE_HOLD_OPEN" = 1 ]; then
-          CAPTAIN_OPEN_HELD_KEYS="${CAPTAIN_OPEN_HELD_KEYS}${CAPTAIN_OPEN_HELD_KEYS:+ }$inventory_key"
-        else
-          answer_rc=0
-          fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
-          case "$answer_rc" in
-            0) : ;;
-            1) fm_send_add_open_held_key "$inventory_key" ;;
-            *) echo "error: cannot verify recorded captain answer for '$inventory_key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
-          esac
-        fi
+    fm_send_gate_held_key "$inventory_key"
+  done
+fi
+CAPTAIN_DISCARDED_KEYS=
+if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_TASK_ID" ] && [ -e "$CAPTAIN_POLICY_STATUS_FILE" ]; then
+  opened_keys=
+  declared_keys=
+  while IFS= read -r policy_line || [ -n "$policy_line" ]; do
+    status_line_verb "$policy_line" policy_verb
+    case "$policy_verb" in
+      needs-decision)
+        policy_key=$(_fm_decision_key "$policy_line") || continue
+        declared_keys=" ${declared_keys# } "
+        declared_keys=${declared_keys// $policy_key / }
+        case " $opened_keys " in
+          *" $policy_key "*) ;;
+          *) opened_keys="${opened_keys}${opened_keys:+ }$policy_key" ;;
+        esac
         ;;
-      1) fm_send_add_open_held_key "$inventory_key" ;;
-      *) echo "error: cannot verify captain-held decision '$inventory_key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
+      note)
+        policy_note=$(status_line_note "$policy_line")
+        case "$policy_note" in
+          "decision-declaration: answered-key="*)
+            declared_keys="$declared_keys ${policy_note#decision-declaration: answered-key=}"
+            ;;
+        esac
+        ;;
     esac
+  done < "$CAPTAIN_POLICY_STATUS_FILE"
+  for policy_key in $opened_keys; do
+    _fm_open_set_has "$CAPTAIN_POLICY_OPEN_SET" "$policy_key" && continue
+    CAPTAIN_DISCARDED_KEYS="${CAPTAIN_DISCARDED_KEYS}${CAPTAIN_DISCARDED_KEYS:+ }$policy_key"
+    case ",$CAPTAIN_POLICY_INVENTORY," in *",$policy_key,"*) continue ;; esac
+    case " $declared_keys " in *" $policy_key "*) continue ;; esac
+    fm_send_gate_held_key "$policy_key"
   done
 fi
 CAPTAIN_OPEN_DECISION_KEYS=$CAPTAIN_OPEN_NEEDS_KEYS
@@ -835,8 +874,8 @@ if [ -n "$RESOLVE_KEYS" ]; then
     # captain-held task is exactly this case, and it is answerable - just
     # through the other ledger - so check there before refusing.
     if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
-      case ",$CAPTAIN_POLICY_INVENTORY," in
-      *",$k,"*) : ;;
+      case ",$CAPTAIN_POLICY_INVENTORY, $CAPTAIN_DISCARDED_KEYS " in
+      *",$k,"* | *" $k "*) : ;;
       *)
         echo "error: --resolve-key '$k': no open decision in $RESOLVE_STATUS_FILE and no captain-held decision '$k' in this task's inventory; nothing was sent." >&2
         exit 1
