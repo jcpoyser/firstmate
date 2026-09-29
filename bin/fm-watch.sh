@@ -1821,10 +1821,6 @@ task_captain_call_open() {  # <task>
   return 0
 }
 
-decision_presentation_marker() {  # <window-key>
-  printf '%s/.decision-presented-%s' "$STATE" "$1"
-}
-
 decision_presentation_endpoint_live() {  # <status-file>
   local statusf=$1 task meta kind win backend state
   task=${statusf##*/}; task=${task%.status}
@@ -1880,7 +1876,7 @@ record_decision_status_presentation() {  # <status-file> <expected-signature>
   [ -n "$win" ] || return 1
   key=$(window_key "$win")
   identity=$(status_decision_presentation_identity "$statusf" "$expected") || return 1
-  marker=$(decision_presentation_marker "$key")
+  marker="$STATE/.decision-presented-$key"
   printf '%s' "$identity" > "$marker"
 }
 
