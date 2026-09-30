@@ -244,7 +244,7 @@ COMPLETION_FILE="$STATE/.session-start-complete"
 AGENTS_BASELINE_FILE="$STATE/.session-start-agents-baseline"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-session-start.sh" || exit 1
+fm_primary_supervisor_guard "bin/fm-session-start.sh" || exit 1
 
 REEMIT=0
 SESSION_SOURCE=

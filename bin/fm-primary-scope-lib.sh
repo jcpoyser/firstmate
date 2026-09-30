@@ -71,10 +71,16 @@ fm_primary_test_home_isolated() {
   [ "$home_root" = "$state_root" ]
 }
 
-fm_primary_supervisor_guard() {  # <root> <entrypoint>
-  local root=$1 entrypoint=$2
-  fm_primary_checkout_matches "$root" && return 0
-  fm_primary_test_home_isolated && return 0
+# Refuse supervisor-only entrypoints outside the primary checkout containing
+# this sourced library. Caller-supplied root overrides never establish authority.
+fm_primary_supervisor_guard() {  # <entrypoint>
+  local entrypoint=${1:-unknown} source_dir root
+  source_dir=$(CDPATH='' cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || source_dir=
+  root=
+  [ -n "$source_dir" ] && root=$(CDPATH='' cd -P "$source_dir/.." 2>/dev/null && pwd -P) || root=
+  if [ -n "$root" ] && fm_primary_checkout_matches "$root"; then
+    return 0
+  fi
   printf 'error: refusing supervisor-only %s from a crew/scout worktree or non-primary checkout; return to your own task\n' "$entrypoint" >&2
   return 1
 }

@@ -39,7 +39,7 @@ FM_AFK_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$FM_AFK_START_DIR/fm-primary-scope-lib.sh"
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
-  fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-afk-start.sh" || exit 1
+  fm_primary_supervisor_guard "bin/fm-afk-start.sh" || exit 1
 fi
 FM_AFK_LOCK="$FM_AFK_STATE/.supervise-daemon.lock"
 FM_AFK_DAEMON="$FM_AFK_START_DIR/fm-supervise-daemon.sh"

@@ -168,7 +168,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-supervision-host.sh" || exit 1
+fm_primary_supervisor_guard "bin/fm-supervision-host.sh" || exit 1
 
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"

@@ -174,7 +174,7 @@ CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-  fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-watch.sh" || exit 1
+  fm_primary_supervisor_guard "bin/fm-watch.sh" || exit 1
 fi
 mkdir -p "$STATE"
 # A home that never existed (a state-only test fixture) is not a home that

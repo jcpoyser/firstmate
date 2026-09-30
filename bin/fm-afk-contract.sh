@@ -132,7 +132,7 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$FM_AFK_CONTRACT_DIR/fm-primary-scope-lib.sh"
-  fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-afk-contract.sh" || exit 1
+  fm_primary_supervisor_guard "bin/fm-afk-contract.sh" || exit 1
 fi
 
 # shellcheck source=bin/fm-classify-lib.sh

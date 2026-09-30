@@ -81,11 +81,11 @@ for script in "${scripts[@]}"; do
   error="$TMP_ROOT/$script.err"
   status=0
   fm_run_timed 5 env -u FM_TEST_SEAM \
-    FM_ROOT_OVERRIDE="$WORKER" \
+    FM_ROOT_OVERRIDE="$PRIMARY" \
     FM_HOME="$WORKER_HOME" \
     FM_STATE_OVERRIDE="$WORKER_HOME/state" \
     FM_POLL=1 FM_ARM_CONFIRM_TIMEOUT=1 FM_SUPERVISION_HOST_PARK_SECONDS=1 \
-    "$ROOT/bin/$script" "${args[@]}" > "$output" 2> "$error" || status=$?
+    "$WORKER/bin/$script" "${args[@]}" > "$output" 2> "$error" || status=$?
   [ "$status" -eq 1 ] || fail "$script did not refuse the worker invocation (exit $status)"
   grep -Fq 'return to your own task' "$error" \
     || fail "$script refusal did not tell the worker to return to its task"
@@ -96,10 +96,10 @@ done
 before=$(snapshot_home "$WORKER_HOME")
 status=0
 fm_run_timed 5 env FM_TEST_SEAM=1 \
-  FM_ROOT_OVERRIDE="$WORKER" \
+  FM_ROOT_OVERRIDE="$PRIMARY" \
   FM_HOME="$WORKER_HOME" \
   FM_STATE_OVERRIDE="$WORKER_HOME/state" \
-  "$ROOT/bin/fm-wake-drain.sh" --help > "$TMP_ROOT/seam.out" 2> "$TMP_ROOT/seam.err" || status=$?
+  "$WORKER/bin/fm-wake-drain.sh" --help > "$TMP_ROOT/seam.out" 2> "$TMP_ROOT/seam.err" || status=$?
 [ "$status" -eq 1 ] || fail "FM_TEST_SEAM bypassed the worker guard (exit $status)"
 grep -Fq 'return to your own task' "$TMP_ROOT/seam.err" \
   || fail "FM_TEST_SEAM refusal did not name the worker action"
@@ -112,7 +112,7 @@ primary_output=$(env -u FM_TEST_SEAM \
   FM_ROOT_OVERRIDE="$PRIMARY" \
   FM_HOME="$PRIMARY_HOME" \
   FM_STATE_OVERRIDE="$PRIMARY_HOME/state" \
-  "$ROOT/bin/fm-lock.sh" status 2>&1) || fail "plain primary lock status was refused: $primary_output"
+  "$PRIMARY/bin/fm-lock.sh" status 2>&1) || fail "plain primary lock status was refused: $primary_output"
 assert_contains "$primary_output" 'lock: free' "plain primary invocation changed"
 [ -d "$PRIMARY_HOME/state" ] || fail "primary lock invocation did not create its initial state directory"
 
@@ -123,7 +123,7 @@ mate_output=$(env -u FM_TEST_SEAM \
   FM_ROOT_OVERRIDE="$WORKER" \
   FM_HOME="$MATE_HOME" \
   FM_STATE_OVERRIDE="$MATE_HOME/state" \
-  "$ROOT/bin/fm-lock.sh" status 2>&1) || fail "marked secondmate primary lock status was refused: $mate_output"
+  "$WORKER/bin/fm-lock.sh" status 2>&1) || fail "marked secondmate primary lock status was refused: $mate_output"
 assert_contains "$mate_output" 'lock: free' "secondmate primary invocation changed"
 rm -f "$WORKER/.fm-secondmate-home"
 

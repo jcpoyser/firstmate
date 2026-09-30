@@ -166,7 +166,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$FM_DAEMON_DIR/fm-primary-scope-lib.sh"
-  fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-supervise-daemon.sh" || exit 1
+  fm_primary_supervisor_guard "bin/fm-supervise-daemon.sh" || exit 1
 fi
 
 # Shared tmux pane primitives for supervisor injection (busy/composer detection
