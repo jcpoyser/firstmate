@@ -176,7 +176,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 if [ "${1:-}" != "lavish-compatible" ]; then
   # shellcheck source=bin/fm-primary-scope-lib.sh
   . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
-  fm_primary_supervisor_guard "$FM_ROOT" "bin/fm-bootstrap.sh" || exit 1
+  fm_primary_supervisor_guard "bin/fm-bootstrap.sh" || exit 1
 fi
 # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-tasks-axi-lib.sh"
