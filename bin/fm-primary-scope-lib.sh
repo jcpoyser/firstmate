@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
-# Shared marker-or-plain-checkout predicate for tracked hooks and supervisor
-# entrypoints scoped to a genuine firstmate primary home. This file is sourced
-# without side effects. Deliberate forgery of records or environment by a
-# process running as the same OS user is out of scope: file checks cannot prevent it.
+# Shared marker-or-plain-checkout predicate for entrypoints scoped to a genuine
+# firstmate primary home. This file is sourced by hook and supervisor entrypoints
+# without side effects.
+#
+# Threat model: the supervisor guard stops an ordinary crew/scout worker that
+# has lost track of its role from running supervisor-only entrypoints out of
+# its own worktree. Authority comes only from the checkout containing the
+# executing script. Deliberate forgery of checkout records, provisioning files,
+# or environment by a process running as the same OS user is out of scope:
+# file checks cannot prevent it.
 
 # Return 0 when $1 carries a genuine secondmate-home marker.
 fm_root_is_secondmate_home() {
