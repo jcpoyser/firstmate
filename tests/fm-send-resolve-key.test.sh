@@ -934,7 +934,7 @@ test_terminal_status_does_not_settle_decisions() {
   local dir fb log err home rc verb
   dir="$TMP_ROOT/terminal-cleared-decision"; mkdir -p "$dir"
   fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
-  for verb in done failed; do
+  for verb in 'done' failed; do
     home=$(setup_home "terminal-$verb")
     mkdir -p "$home/config"
     : > "$home/config/captain-decides-findings"
