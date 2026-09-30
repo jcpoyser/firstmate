@@ -622,6 +622,7 @@ fm_send_status_open_decisions() { # <status-file>
   status_open_decisions "$file"
 }
 CAPTAIN_OPEN_NEEDS_KEYS=
+CAPTAIN_HISTORICAL_NEEDS_KEYS=
 CAPTAIN_POLICY_TASK_ID=
 CAPTAIN_POLICY_INVENTORY=
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$TARGET_META" ]; then
@@ -664,6 +665,7 @@ fm_send_authoritative_hold() {
   FM_SEND_AUTHORITATIVE_HOLD_ID=
   FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
   resolved=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
+    FM_PREFER_ORIGIN_HOLD="$CAPTAIN_DECIDES_FINDINGS" \
     "$SCRIPT_DIR/fm-captain-hold.sh" resolve-entry "$1" "$2" 2>/dev/null) || return $?
   if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
     "$SCRIPT_DIR/fm-captain-hold.sh" open "$resolved" --distinguish-absent >/dev/null 2>&1; then
@@ -749,13 +751,20 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_TASK_ID" ] && [ 
     status_line_verb "$policy_line" policy_verb
     [ "$policy_verb" = needs-decision ] || continue
     policy_key=$(_fm_decision_key "$policy_line") || continue
+    case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+      *" $policy_key "*) ;;
+      *) CAPTAIN_HISTORICAL_NEEDS_KEYS="${CAPTAIN_HISTORICAL_NEEDS_KEYS}${CAPTAIN_HISTORICAL_NEEDS_KEYS:+ }$policy_key" ;;
+    esac
     case " $opened_keys " in
       *" $policy_key "*) ;;
       *) opened_keys="${opened_keys}${opened_keys:+ }$policy_key" ;;
     esac
   done < "$CAPTAIN_POLICY_STATUS_FILE"
   for policy_key in $opened_keys; do
-    _fm_open_set_has "$CAPTAIN_POLICY_OPEN_SET" "$policy_key" && continue
+    if _fm_open_set_has "$CAPTAIN_POLICY_OPEN_SET" "$policy_key" &&
+      [ "$(_fm_open_set_verb "$CAPTAIN_POLICY_OPEN_SET" "$policy_key")" = needs-decision ]; then
+      continue
+    fi
     case ",$CAPTAIN_POLICY_INVENTORY," in *",$policy_key,"*) continue ;; esac
     fm_send_gate_held_key "$policy_key"
   done
@@ -860,8 +869,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
     case "$resolve_open_set" in
     "$k"$'\t'* | *$'\n'"$k"$'\t'*)
       RESOLVE_STATUS_KEYS="${RESOLVE_STATUS_KEYS}${RESOLVE_STATUS_KEYS:+ }$k"
-      [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" != needs-decision ] ||
+      if [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ]; then
         RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
+      else
+        case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+          *" $k "*) RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k" ;;
+        esac
+      fi
       continue
       ;;
     esac
@@ -883,8 +897,9 @@ if [ -n "$RESOLVE_KEYS" ]; then
   done
   if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
     for k in $RESOLVE_STATUS_KEYS; do
-      [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" != needs-decision ] ||
-        fm_send_require_captain_answer "$k" || exit 1
+      case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+        *" $k "*) fm_send_require_captain_answer "$k" || exit 1 ;;
+      esac
     done
   fi
   for answer_id in $CAPTAIN_ANSWER_IDS; do
@@ -903,7 +918,13 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_IS_DECISION=0
   [ -z "$RESOLVE_HOLD_KEYS" ] || RESOLVE_IS_DECISION=1
   for k in $RESOLVE_STATUS_KEYS; do
-    [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ] && RESOLVE_IS_DECISION=1
+    if [ "$(_fm_open_set_verb "$resolve_open_set" "$k")" = needs-decision ]; then
+      RESOLVE_IS_DECISION=1
+    else
+      case " $CAPTAIN_HISTORICAL_NEEDS_KEYS " in
+        *" $k "*) RESOLVE_IS_DECISION=1 ;;
+      esac
+    fi
   done
   if [ "$RESOLVE_IS_DECISION" -eq 1 ]; then
     fm_lease_forbid_branch "decision answer (fm-send --resolve-key)" --away-relocated

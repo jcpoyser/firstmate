@@ -736,23 +736,37 @@ resolve_migrated_entry() {  # <origin-or-empty> <entry>
 # Prints "<resolved id> <how>", where <how> is exact, legacy, migrated-note or
 # migrated-prefix, so a caller can record which evidence carried the attestation.
 resolve_entry() {  # <origin-or-empty> <entry>; prints "<id> <how>" or fails
-  local origin=$1 entry=$2 legacy migrated rc show resolved
+  local origin=$1 entry=$2 legacy migrated rc show resolved exact_show='' exact_id='' exact_active=0
+  local legacy_show='' legacy_id='' legacy_active=0
   if task_show "$entry"; then
-    show=$TASK_SHOW_OUTPUT
-    resolved=$(show_field "$show" id)
-    [ -n "$resolved" ] || fail "the backlog did not return a task id for $entry"
-    printf '%s exact' "$resolved"
-    return 0
+    exact_show=$TASK_SHOW_OUTPUT
+    exact_id=$(show_field "$exact_show" id)
+    [ -n "$exact_id" ] || fail "the backlog did not return a task id for $entry"
+    [ "$(show_field "$exact_show" state)" != "done" ] &&
+      [ "$(show_field_value "$exact_show" hold_kind)" = captain ] && exact_active=1
   fi
   if [ -n "$origin" ] && [ "$origin" != "$BINDING_ANY" ]; then
     legacy=$(legacy_hold_id "$origin" "$entry")
     if task_show "$legacy"; then
-      show=$TASK_SHOW_OUTPUT
-      resolved=$(show_field "$show" id)
-      [ -n "$resolved" ] || fail "the backlog did not return a task id for $legacy"
-      printf '%s legacy' "$resolved"
-      return 0
+      legacy_show=$TASK_SHOW_OUTPUT
+      legacy_id=$(show_field "$legacy_show" id)
+      [ -n "$legacy_id" ] || fail "the backlog did not return a task id for $legacy"
+      [ "$(show_field "$legacy_show" state)" != "done" ] &&
+        [ "$(show_field_value "$legacy_show" hold_kind)" = captain ] && legacy_active=1
     fi
+  fi
+  if [ "${FM_PREFER_ORIGIN_HOLD:-0}" = 1 ] &&
+    [ "$legacy_active" = 1 ] && [ "$exact_active" != 1 ]; then
+    printf '%s legacy' "$legacy_id"
+    return 0
+  fi
+  if [ -n "$exact_id" ]; then
+    printf '%s exact' "$exact_id"
+    return 0
+  fi
+  if [ -n "$legacy_id" ]; then
+    printf '%s legacy' "$legacy_id"
+    return 0
   fi
   rc=0
   migrated=$(resolve_migrated_entry "$origin" "$entry") || rc=$?

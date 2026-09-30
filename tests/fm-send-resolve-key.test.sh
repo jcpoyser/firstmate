@@ -843,6 +843,27 @@ test_self_resolved_decision_still_gates_steers() {
   pass "fm-send keeps a worker-resolved decision open until its captain answer record exists"
 }
 
+test_blocked_key_retains_decision_answer_requirement() {
+  local dir fb log err home rc
+  dir="$TMP_ROOT/blocked-decision-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home blocked-decision-key)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tblocked.meta" "window=sess:fm-tblocked" "kind=ship"
+  printf '%s\n' 'needs-decision [key=review]: review this change' \
+    'blocked [key=review]: waiting on the review answer' > "$home/state/tblocked.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tblocked --resolve-key review \
+    'approve the change' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "a blocked key discarded its needs-decision captain-answer requirement"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer" \
+    "the blocked decision should require its recorded captain answer"
+  [ ! -e "$home/state/tblocked.inbox/001.msg" ] || fail "an answer without captain approval reached the worker"
+  pass "fm-send preserves decision ownership when a key changes to blocked"
+}
+
 test_answered_key_note_does_not_settle_decision() {
   local dir fb log err home rc
   dir="$TMP_ROOT/answered-key-note"; mkdir -p "$dir"
@@ -862,6 +883,32 @@ test_answered_key_note_does_not_settle_decision() {
     "a forged answered-key note should leave the decision open"
   [ ! -e "$home/state/tnote.inbox/001.msg" ] || fail "a steer reached the worker on a forged note"
   pass "fm-send ignores status answered-key notes as answer authority"
+}
+
+test_old_key_answer_cannot_override_origin_hold() {
+  local dir fb log err home rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for durable captain-hold compatibility)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/old-key-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home old-key-answer)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tnew.meta" "window=sess:fm-tnew" "kind=ship"
+  printf 'needs-decision [key=review]: review the new decision\n' > "$home/state/tnew.status"
+  setup_captain_answer "$home" review 'Approve the old decision.'
+  setup_captain_hold "$home" tnew-decision-review
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tnew --resolve-key review \
+    --captain-answer review 'approve the new decision' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "an old key-named answer authorized a different origin's unanswered decision"
+  assert_contains "$(cat "$err")" "missing a recorded captain answer" \
+    "the origin-derived unanswered hold should be authoritative"
+  [ ! -e "$home/state/tnew.inbox/001.msg" ] || fail "the stale answer reached the worker"
+  pass "fm-send binds a keyed answer to the origin-derived hold before a global key task"
 }
 
 test_double_relay_is_refused() {
@@ -1983,6 +2030,8 @@ test_missing_and_unreadable_inventory_holds_block_plain_steers
 test_uninventoried_answered_hold_cannot_be_relayed
 test_self_resolved_decision_still_gates_steers
 test_answered_key_note_does_not_settle_decision
+test_blocked_key_retains_decision_answer_requirement
+test_old_key_answer_cannot_override_origin_hold
 test_double_relay_is_refused
 test_answered_secondmate_decision_does_not_block
 test_terminal_status_does_not_settle_decisions
