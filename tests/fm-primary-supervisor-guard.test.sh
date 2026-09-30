@@ -2,8 +2,9 @@
 # Verify supervisor-only entrypoints trust only the checkout that contains
 # them: linked worker worktrees are refused whatever root, home, or state
 # overrides the caller supplies, including disposable test-fixture state and
-# symlinks into it, and a secondmate marker alone never promotes a worker. Plain
-# primaries and provisioned secondmate homes keep their startup behavior.
+# symlinks into it, and a secondmate marker alone never promotes a worker. An
+# ordinary worker with no overrides is refused by every entrypoint, while plain
+# primaries and homes provisioned by bin/fm-home-seed.sh keep their behavior.
 set -euo pipefail
 
 # shellcheck source=tests/lib.sh
@@ -16,7 +17,7 @@ unset FM_TEST_SEAM FM_HOME FM_ROOT_OVERRIDE FM_STATE_OVERRIDE
 
 TMP_ROOT=$(fm_test_tmproot primary-supervisor-guard)
 PRIMARY="$TMP_ROOT/primary"
-git clone --quiet --shared "$ROOT" "$PRIMARY" || fail "could not create the plain-primary fixture"
+git -c advice.detachedHead=false clone --quiet --shared "$ROOT" "$PRIMARY" || fail "could not create the plain-primary fixture"
 cp -R "$ROOT/bin/." "$PRIMARY/bin/"
 git -C "$PRIMARY" add -A bin
 git -C "$PRIMARY" commit --quiet --allow-empty -m 'guard test: current supervisor copy' \
@@ -75,9 +76,9 @@ scripts=(
   fm-branch-outcome.sh
   fm-branch-report.sh
 )
-for script in "${scripts[@]}"; do
+script_args() {  # <script>
   args=(--help)
-  case "$script" in
+  case "$1" in
     fm-bootstrap.sh) args=(install __guard_test_unknown_tool__) ;;
     fm-afk-contract.sh) args=(enter --words worker-must-not-write) ;;
     fm-afk-launch.sh) args=(enter --words worker-must-not-write) ;;
@@ -85,6 +86,25 @@ for script in "${scripts[@]}"; do
     fm-branch-outcome.sh) args=(append --task guard-test --verdict routine --summary worker-must-not-write) ;;
     fm-branch-report.sh) args=(--task guard-test --verdict routine --summary worker-must-not-write) ;;
   esac
+}
+
+# An ordinary worker in its own worktree, with no overrides and no records of
+# any kind, is refused by every supervisor-only entrypoint before it writes.
+worker_tree() {
+  git -C "$WORKER" status --porcelain --ignored --untracked-files=all
+}
+for script in "${scripts[@]}"; do
+  script_args "$script"
+  before=$(worker_tree)
+  status=0
+  (cd "$WORKER" && fm_run_timed 5 env FM_POLL=1 FM_ARM_CONFIRM_TIMEOUT=1 FM_SUPERVISION_HOST_PARK_SECONDS=1 \
+    "bin/$script" "${args[@]}") > "$TMP_ROOT/$script.plain.out" 2> "$TMP_ROOT/$script.plain.err" || status=$?
+  assert_refused "$script from an ordinary worker worktree" "$TMP_ROOT/$script.plain.err" "$status"
+  [ "$before" = "$(worker_tree)" ] || fail "$script changed the ordinary worker worktree before refusing"
+done
+
+for script in "${scripts[@]}"; do
+  script_args "$script"
   before=$(snapshot_tree "$WORKER_HOME")
   status=0
   fm_run_timed 5 env \
@@ -147,26 +167,22 @@ fm_run_timed 5 env FM_HOME="$MATE_HOME" FM_STATE_OVERRIDE="$MATE_HOME/state" \
 assert_refused "unregistered secondmate binding" "$TMP_ROOT/unregistered.err" "$status"
 [ ! -e "$MATE_HOME/state" ] || fail "unregistered secondmate checkout created state before refusing"
 
-# A provisioned secondmate home: marker, local parent binding, and the parent's
-# registry entry naming this checkout as that mate's home.
+# A secondmate home provisioned by the real seeding path is admitted.
 MATE=$(linked_worktree secondmate) || fail "could not create the linked secondmate fixture"
-printf '%s\n' guard-test-mate > "$MATE/.fm-secondmate-home"
-printf 'schema=fm-secondmate-parent.v1\nroute=local\nparent_home=%s\n' "$PARENT_HOME" > "$MATE/.fm-secondmate-parent"
-printf -- '- guard-test-mate - Guard test mate (home: %s; scope: guard tests; projects: none; added 2026-09-29)\n' \
-  "$MATE" > "$PARENT_HOME/data/secondmates.md"
-mate_output=$(env FM_HOME="$MATE_HOME" FM_STATE_OVERRIDE="$MATE_HOME/state" \
-  "$MATE/bin/fm-lock.sh" status 2>&1) || fail "provisioned secondmate lock status was refused: $mate_output"
+seed_output=$(env FM_HOME="$PARENT_HOME" FM_SECONDMATE_CHARTER='Supervisor guard regression charter.' \
+  "$PRIMARY/bin/fm-home-seed.sh" guard-test-mate "$MATE" --no-projects 2>&1) \
+  || fail "real secondmate seeding failed: $seed_output"
+mate_output=$(env FM_HOME="$MATE" "$MATE/bin/fm-lock.sh" status 2>&1) \
+  || fail "provisioned secondmate lock status was refused: $mate_output"
 assert_contains "$mate_output" 'lock: free' "provisioned secondmate invocation changed"
 status=0
 fm_run_timed 5 env FM_HOME="$MATE_HOME" FM_STATE_OVERRIDE="$MATE_HOME/state" \
   "$WORKER/bin/fm-lock.sh" status > "$TMP_ROOT/other-home.out" 2> "$TMP_ROOT/other-home.err" || status=$?
 assert_refused "worker binding to another mate's registry entry" "$TMP_ROOT/other-home.err" "$status"
 
-PRIMARY_HOME="$TMP_ROOT/primary-home"
-mkdir -p "$PRIMARY_HOME"
-primary_output=$(env FM_HOME="$PRIMARY_HOME" FM_STATE_OVERRIDE="$PRIMARY_HOME/state" \
-  "$PRIMARY/bin/fm-lock.sh" status 2>&1) || fail "plain primary lock status was refused: $primary_output"
+primary_output=$(cd "$PRIMARY" && bin/fm-lock.sh status 2>&1) \
+  || fail "plain primary lock status was refused: $primary_output"
 assert_contains "$primary_output" 'lock: free' "plain primary invocation changed"
-[ -d "$PRIMARY_HOME/state" ] || fail "primary lock invocation did not create its initial state directory"
+[ -d "$PRIMARY/state" ] || fail "primary lock invocation did not create its initial state directory"
 
 pass "supervisor guard trusts only the executing checkout: overrides, fixture state, and bare markers never admit a worker"

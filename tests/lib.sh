@@ -292,51 +292,16 @@ if [ "${FM_TEST_SKIP_ORPHAN_REAP:-0}" != 1 ]; then
 fi
 
 # --- primary checkout ------------------------------------------------------
-#
-# Supervisor-only entrypoints trust only the checkout that contains them, and a
-# linked crew/scout worktree is never that checkout (bin/fm-primary-scope-lib.sh).
-# A suite run from a linked worktree therefore runs against a disposable plain
-# clone of the same commit carrying the same uncommitted and untracked files, so
-# "$ROOT/bin/..." is always the real supervisor copy in a primary checkout.
-fm_test_plain_checkout() {  # <dir>
-  local git_dir git_common_dir
-  git_dir=$(git -C "$1" rev-parse --git-dir 2>/dev/null) || return 1
-  git_common_dir=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
-  [ "$git_dir" = "$git_common_dir" ]
-}
-
-# Make <dir> a plain primary checkout, for a fixture that installs copied
-# supervisor scripts under <dir>/bin.
-fm_test_primary_checkout() {  # <dir>
-  local dir=$1
-  [ -f "$dir/AGENTS.md" ] || cp "$ROOT/AGENTS.md" "$dir/AGENTS.md" || return 1
-  fm_test_plain_checkout "$dir" && return 0
-  git init --quiet "$dir"
-}
-
-fm_test_primary_snapshot() {  # <source-checkout>
-  local src=$1 base snap head patch
-  base=$(fm_test_tmproot fm-test-primary) || return 1
-  snap="$base/firstmate"
-  patch="$base/worktree.patch"
-  head=$(git -C "$src" rev-parse HEAD) || return 1
-  git clone --quiet --shared --no-checkout "$src" "$snap" || return 1
-  git -C "$snap" checkout --quiet --detach "$head" || return 1
-  git -C "$src" diff --binary HEAD > "$patch" || return 1
-  if [ -s "$patch" ]; then
-    git -C "$snap" apply --whitespace=nowarn "$patch" || return 1
-  fi
-  (cd "$src" && git ls-files -z -o --exclude-standard | tar --null -T - -cf -) \
-    | tar -xf - -C "$snap" || return 1
-  printf '%s\n' "$snap"
-}
+# shellcheck source=tests/primary-checkout-helpers.sh
+. "$(dirname "${BASH_SOURCE[0]}")/primary-checkout-helpers.sh"
 
 if ! fm_test_plain_checkout "$ROOT"; then
   FM_TEST_SOURCE_ROOT=$(cd -P "$ROOT" && pwd -P)
-  ROOT=$(fm_test_primary_snapshot "$FM_TEST_SOURCE_ROOT") || {
+  if ! FM_TEST_PRIMARY_BASE=$(fm_test_tmproot fm-test-primary) ||
+    ! ROOT=$(fm_test_primary_snapshot "$FM_TEST_SOURCE_ROOT" "$FM_TEST_PRIMARY_BASE"); then
     printf 'not ok - could not stage a plain primary checkout for this suite\n' >&2
     exit 1
-  }
+  fi
   if [ "$(pwd -P)" = "$FM_TEST_SOURCE_ROOT" ]; then
     cd "$ROOT" || exit 1
   fi
