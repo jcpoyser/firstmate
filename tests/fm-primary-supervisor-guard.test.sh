@@ -15,6 +15,12 @@ WORKER="$TMP_ROOT/worker"
 mkdir -p "$TMP_ROOT"
 git clone --quiet --shared "$ROOT" "$PRIMARY" || fail "could not create the plain-primary fixture"
 git -C "$PRIMARY" worktree add --quiet --detach "$WORKER" HEAD || fail "could not create the linked worker fixture"
+UNMARKED_WORKER=$(mktemp -d "${TMPDIR:-/tmp}/fm-primary-supervisor-unmarked-worker.XXXXXX") \
+  || fail "could not create an unmarked linked-worktree path"
+printf '%s\n' "$UNMARKED_WORKER" >> "$FM_TEST_CLEANUP_REGISTRY"
+rmdir "$UNMARKED_WORKER"
+git -C "$PRIMARY" worktree add --quiet --detach "$UNMARKED_WORKER" HEAD \
+  || fail "could not create the unmarked linked worker fixture"
 
 primary_git_dir=$(git -C "$PRIMARY" rev-parse --git-dir)
 primary_common_dir=$(git -C "$PRIMARY" rev-parse --git-common-dir)
@@ -22,6 +28,10 @@ primary_common_dir=$(git -C "$PRIMARY" rev-parse --git-common-dir)
 worker_git_dir=$(git -C "$WORKER" rev-parse --git-dir)
 worker_common_dir=$(git -C "$WORKER" rev-parse --git-common-dir)
 [ "$worker_git_dir" != "$worker_common_dir" ] || fail "worker fixture is not a linked worktree"
+unmarked_worker_git_dir=$(git -C "$UNMARKED_WORKER" rev-parse --git-dir)
+unmarked_worker_common_dir=$(git -C "$UNMARKED_WORKER" rev-parse --git-common-dir)
+[ "$unmarked_worker_git_dir" != "$unmarked_worker_common_dir" ] \
+  || fail "unmarked worker fixture is not a linked worktree"
 
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$ROOT/bin/fm-primary-scope-lib.sh"
@@ -95,15 +105,15 @@ done
 
 STATE_ONLY="$TMP_ROOT/state-only/state"
 mkdir -p "$STATE_ONLY"
-before=$(snapshot_home "$WORKER")
+before=$(snapshot_home "$UNMARKED_WORKER")
 status=0
 env -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_TEST_SEAM \
   FM_STATE_OVERRIDE="$STATE_ONLY" \
-  "$WORKER/bin/fm-wake-drain.sh" > "$TMP_ROOT/state-only.out" 2> "$TMP_ROOT/state-only.err" || status=$?
+  "$UNMARKED_WORKER/bin/fm-wake-drain.sh" > "$TMP_ROOT/state-only.out" 2> "$TMP_ROOT/state-only.err" || status=$?
 [ "$status" -eq 0 ] || fail "state-override-only fixture invocation was refused (exit $status)"
 [ -f "$STATE_ONLY/.wake-queue" ] \
   || fail "state-override-only invocation did not initialize the fixture queue"
-after=$(snapshot_home "$WORKER")
+after=$(snapshot_home "$UNMARKED_WORKER")
 [ "$before" = "$after" ] || fail "state-override-only drain changed the linked worker checkout"
 
 before=$(snapshot_home "$WORKER_HOME")
@@ -124,7 +134,7 @@ mkdir -p "$PRIMARY_HOME"
 status=0
 env -u FM_STATE_OVERRIDE -u FM_TEST_SEAM \
   FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY_HOME" \
-  "$WORKER/bin/fm-wake-drain.sh" > "$TMP_ROOT/no-state-override.out" 2> "$TMP_ROOT/no-state-override.err" || status=$?
+  "$UNMARKED_WORKER/bin/fm-wake-drain.sh" > "$TMP_ROOT/no-state-override.out" 2> "$TMP_ROOT/no-state-override.err" || status=$?
 [ "$status" -eq 1 ] || fail "fixture FM_HOME without explicit state override was accepted (exit $status)"
 grep -Fq 'return to your own task' "$TMP_ROOT/no-state-override.err" \
   || fail "missing-state-override refusal did not name the worker action"
@@ -148,4 +158,4 @@ mate_output=$(env -u FM_TEST_SEAM \
 assert_contains "$mate_output" 'lock: free' "secondmate primary invocation changed"
 rm -f "$WORKER/.fm-secondmate-home"
 
-pass "primary supervisor guard refuses worker entrypoints without home changes and preserves primary scopes"
+pass "primary supervisor guard rejects root-override workers and preserves state-only fixtures and primary scopes"
