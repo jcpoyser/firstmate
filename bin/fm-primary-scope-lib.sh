@@ -46,10 +46,6 @@ fm_primary_scope_matches() {
   fm_primary_root_matches "$root" && [ -d "$state" ]
 }
 
-fm_primary_checkout_matches() {
-  fm_primary_root_matches "$1"
-}
-
 # Return 0 when $1 is a secondmate home whose provisioning is proven by its own
 # durable local parent binding and by the parent's registry entry naming this
 # checkout as that mate's home. The identity marker alone proves nothing.
