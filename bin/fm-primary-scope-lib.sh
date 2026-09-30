@@ -62,13 +62,12 @@ fm_test_fixture_root_for_path() {
   return 1
 }
 
-fm_primary_test_home_isolated() {
-  local home=${FM_HOME:-} state=${FM_STATE_OVERRIDE:-} home_root state_root
-  [ -n "$home" ] || return 1
-  [ -n "$state" ] || state="$home/state"
-  home_root=$(fm_test_fixture_root_for_path "$home") || return 1
-  state_root=$(fm_test_fixture_root_for_path "$state") || return 1
-  [ "$home_root" = "$state_root" ]
+# Test suites may run supervisor entrypoints only with an explicit state
+# override inside a self-cleaning fixture tree.
+fm_primary_test_state_isolated() {
+  local state=${FM_STATE_OVERRIDE:-}
+  [ -n "$state" ] || return 1
+  fm_test_fixture_root_for_path "$state" >/dev/null
 }
 
 # Refuse supervisor-only entrypoints outside the primary checkout containing
@@ -78,8 +77,9 @@ fm_primary_supervisor_guard() {  # <entrypoint>
   source_dir=$(CDPATH='' cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || source_dir=
   root=
   [ -n "$source_dir" ] && root=$(CDPATH='' cd -P "$source_dir/.." 2>/dev/null && pwd -P) || root=
-  if [ -n "$root" ] && fm_primary_checkout_matches "$root"; then
-    return 0
+  if [ -n "$root" ]; then
+    fm_primary_checkout_matches "$root" && return 0
+    fm_primary_test_state_isolated && return 0
   fi
   printf 'error: refusing supervisor-only %s from a crew/scout worktree or non-primary checkout; return to your own task\n' "$entrypoint" >&2
   return 1

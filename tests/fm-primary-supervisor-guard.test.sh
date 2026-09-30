@@ -93,6 +93,19 @@ for script in "${scripts[@]}"; do
   [ "$before" = "$after" ] || fail "$script changed the worker home before refusing"
 done
 
+STATE_ONLY="$TMP_ROOT/state-only/state"
+mkdir -p "$STATE_ONLY"
+before=$(snapshot_home "$WORKER")
+status=0
+env -u FM_HOME -u FM_ROOT_OVERRIDE -u FM_TEST_SEAM \
+  FM_STATE_OVERRIDE="$STATE_ONLY" \
+  "$WORKER/bin/fm-wake-drain.sh" > "$TMP_ROOT/state-only.out" 2> "$TMP_ROOT/state-only.err" || status=$?
+[ "$status" -eq 0 ] || fail "state-override-only fixture invocation was refused (exit $status)"
+[ -f "$STATE_ONLY/.wake-queue" ] \
+  || fail "state-override-only invocation did not initialize the fixture queue"
+after=$(snapshot_home "$WORKER")
+[ "$before" = "$after" ] || fail "state-override-only drain changed the linked worker checkout"
+
 before=$(snapshot_home "$WORKER_HOME")
 status=0
 fm_run_timed 5 env FM_TEST_SEAM=1 \
@@ -108,6 +121,14 @@ after=$(snapshot_home "$WORKER_HOME")
 
 PRIMARY_HOME="$TMP_ROOT/primary-home"
 mkdir -p "$PRIMARY_HOME"
+status=0
+env -u FM_STATE_OVERRIDE -u FM_TEST_SEAM \
+  FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$PRIMARY_HOME" \
+  "$WORKER/bin/fm-wake-drain.sh" > "$TMP_ROOT/no-state-override.out" 2> "$TMP_ROOT/no-state-override.err" || status=$?
+[ "$status" -eq 1 ] || fail "fixture FM_HOME without explicit state override was accepted (exit $status)"
+grep -Fq 'return to your own task' "$TMP_ROOT/no-state-override.err" \
+  || fail "missing-state-override refusal did not name the worker action"
+[ ! -d "$PRIMARY_HOME/state" ] || fail "missing-state-override invocation created default state"
 primary_output=$(env -u FM_TEST_SEAM \
   FM_ROOT_OVERRIDE="$PRIMARY" \
   FM_HOME="$PRIMARY_HOME" \
