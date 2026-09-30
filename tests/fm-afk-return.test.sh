@@ -22,6 +22,7 @@ TMP_ROOT=$(fm_test_tmproot fm-afk-return-tests)
 install_runner() {  # <case-dir>
   local dir=$1
   mkdir -p "$dir/bin" "$dir/home/state" "$dir/home/data" "$dir/home/config"
+  fm_test_primary_checkout "$dir" || fail "could not make $dir a primary checkout"
   cp "$ROOT/bin/fm-afk-return.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/"
