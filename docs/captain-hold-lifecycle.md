@@ -216,8 +216,9 @@ Two channels feed that one intake today, and both are ordinary callers rather th
 `bin/fm-send.sh --resolve-key` is the chat channel:
 
 - For a key the status log still owns, that script's header owns the status-log close.
-- A key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
+- In the default mode, a key the status log no longer owns is resolved to a still-open captain-held task and fed as one keyed line.
   The script tries the key as a task id first, then the legacy derived identity.
+- When `config/captain-decides-findings` is enabled, the captain-held task must instead be answered through `bin/fm-captain-hold.sh answer`; the flag's send rules are owned by [`configuration reference`](configuration.md#captain-decision-enforcement-configcaptain-decides-findings).
 
 `bin/fm-procevent.sh` is the captured-result channel:
 
