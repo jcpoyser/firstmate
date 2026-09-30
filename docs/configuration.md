@@ -130,17 +130,18 @@ While tasks are in flight, dispatch shared-repo edits to a crewmate.
 
 ## Captain decision enforcement (config/captain-decides-findings)
 
-The optional local, gitignored `config/captain-decides-findings` flag requires an explicit decision declaration when a task has an open `needs-decision` key or an unresolved captain-held inventory decision.
-A plain steer cannot stand in for an answer: the matching captain-held task must have a current answer recorded through `bin/fm-captain-hold.sh answer`, and the send must name that task with `--captain-answer <task-id>` alongside `--resolve-key <key>`.
-Use `--no-decision` only for a steer that does not answer any open decision; it does not close or answer that decision.
+The optional local, gitignored `config/captain-decides-findings` flag applies one rule: a decision is answered only by a captain-hold answer record for that exact decision, written through `bin/fm-captain-hold.sh answer`.
+Every `needs-decision` key the task ever opened, and every captain-held inventory entry, stays open until that record exists.
+A worker `resolved`, `done`, or `failed` line, a status note, or a captain-hold transfer that omitted the key does not settle it.
+A missing or unreadable task, a closed task without an answer, or a migrated record that cannot be authoritatively resolved all stay open; uncertainty is not treated as an empty inventory.
+While any decision is open, a plain steer is refused; use `--no-decision` only for a steer that does not answer any open decision, and it does not close or answer that decision.
 
-Every inventory entry stays open unless its exact authoritative task record proves a current answer.
-A missing or unreadable task, a closed task without an answer, or a migrated record that cannot be authoritatively resolved all block plain steers; uncertainty is not treated as an empty inventory.
-A matching `--captain-answer` task id is the decision key or its legacy `<target>-decision-<key>` identity; for a migrated hold, pass the canonical task id that `bin/fm-captain-hold.sh resolve-entry <target> <key>` prints.
-A `needs-decision` key that later leaves the status fold without a captain answer (a worker `resolved`, `done`, or `failed` line, or a captain-hold transfer that omitted it from the inventory) stays open until its captain-held task records an answer or fm-send logs its answered-key declaration.
+A `needs-decision` still open in the status log is closed by an answer send naming `--resolve-key <key>` and the matching `--captain-answer <task-id>`.
+That task id is the decision key or its legacy `<target>-decision-<key>` identity; for a migrated hold, pass the canonical task id that `bin/fm-captain-hold.sh resolve-entry <target> <key>` prints.
+`--resolve-key` for a key not open in the status log is refused: `fm-captain-hold answer` itself settles a held decision, after which the captain's answer can go out as a plain steer.
+For a secondmate's parent-channel key `captain-hold-<task>-<n>`, the answer record is read from that secondmate's own home.
 `answer-recorded` is a firstmate attestation, not proof that the captain authored the answer; the existing record store retains who wrote it and when.
 
-A `--resolve-key` that names neither an open status key nor a decision in this task's inventory is refused, even when a same-named answered task exists.
 Steer wording is not inspected.
 The flag is local to this home and is not inherited by secondmate homes.
 When the flag is absent, send behavior is unchanged.

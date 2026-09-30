@@ -207,19 +207,23 @@
 # refused with --key, an unmapped explicit backend target (no task ledger in
 # this home), and an empty message.
 #
-# When config/captain-decides-findings is present and the task has an open
-# needs-decision key or captain-held inventory decision, each answer must name
-# its key with --resolve-key and matching --captain-answer <task-id>; a send
-# answering none must use --no-decision. Missing, unreadable, closed-unanswered,
-# and unresolved migrated inventory records remain open and block an unmarked
-# steer, as does a needs-decision key that left the status fold without an
-# answered-key declaration or a recorded captain answer. A --resolve-key naming
-# neither an open status key nor an open or inventoried captain decision is
-# refused. Answered keys and no-decision declarations are recorded in the task
-# status. The answer-record check is a
-# firstmate attestation, not proof of captain authorship. These checks apply to
-# task metadata reached through a selector or matching explicit endpoint,
-# before local enqueue or remote transport.
+# When config/captain-decides-findings is present, a decision is answered only
+# by a captain-hold answer record for that exact decision. Every needs-decision
+# key this target ever opened, and every inventory entry, stays open until
+# that record exists; worker resolved/done/failed lines, status notes, and keys
+# a transfer omitted do not settle it. A needs-decision still open in the
+# status log also blocks until an answer send closes it: that send names the
+# key with --resolve-key and the matching --captain-answer <task-id>. A plain
+# steer is refused while any decision is open unless it carries --no-decision.
+# --resolve-key for a key not open in the status log is refused; a held
+# decision is settled by bin/fm-captain-hold.sh answer itself. For a
+# secondmate's parent-channel key captain-hold-<task>-<n>, the answer record is
+# read from the secondmate's own home. Missing, unreadable, closed-unanswered,
+# and unresolved migrated records all stay open. Declarations are recorded in
+# the task status as a log only. The answer-record check is a firstmate
+# attestation, not proof of captain authorship. These checks apply to task
+# metadata reached through a selector or matching explicit endpoint, before
+# local enqueue or remote transport.
 # With the flag absent, existing behavior is unchanged.
 #
 # After a successful TYPED-plane submit fm-send pauses FM_SEND_SETTLE seconds
@@ -645,7 +649,6 @@ RESOLVE_DECISION_KEYS=
 # never both at once.
 RESOLVE_STATUS_KEYS=
 RESOLVE_HOLD_KEYS=
-RESOLVE_PREANSWERED_HOLD_KEYS=
 RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 
 # Resolve a --resolve-key key that the status log no longer owns to the
@@ -695,20 +698,32 @@ fm_send_add_open_held_key() {
 }
 
 fm_send_gate_held_key() { # <decision-key>
-  local key=$1 held_rc=0 answer_rc=0
+  local key=$1 held_rc=0 answer_rc=0 child_home child_id
+  if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
+    case "$key" in
+      captain-hold-?*-[0-9]*)
+        child_id=${key#captain-hold-}
+        child_id=${child_id%-*}
+        child_home=$(fm_meta_get "$TARGET_META" home)
+        if [ -n "$child_home" ] && [ -d "$child_home" ] &&
+          FM_HOME="$child_home" FM_STATE_OVERRIDE="$child_home/state" FM_DATA_OVERRIDE='' \
+            "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$child_id" >/dev/null 2>&1; then
+          return 0
+        fi
+        fm_send_add_open_held_key "$key"
+        return 0
+        ;;
+    esac
+  fi
   fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$key" || held_rc=$?
   case "$held_rc" in
     0)
-      if [ "$FM_SEND_AUTHORITATIVE_HOLD_OPEN" = 1 ]; then
-        fm_send_add_open_held_key "$key"
-      else
-        fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
-        case "$answer_rc" in
-          0) : ;;
-          1) fm_send_add_open_held_key "$key" ;;
-          *) echo "error: cannot verify recorded captain answer for '$key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
-        esac
-      fi
+      fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
+      case "$answer_rc" in
+        0) : ;;
+        1) fm_send_add_open_held_key "$key" ;;
+        *) echo "error: cannot verify recorded captain answer for '$key' on $FM_SEND_AUTHORITATIVE_HOLD_ID; refusing to send" >&2; exit 1 ;;
+      esac
       ;;
     1) fm_send_add_open_held_key "$key" ;;
     *) echo "error: cannot verify captain-held decision '$key' for $CAPTAIN_POLICY_TASK_ID; refusing to send" >&2; exit 1 ;;
@@ -728,37 +743,20 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; th
     fm_send_gate_held_key "$inventory_key"
   done
 fi
-CAPTAIN_DISCARDED_KEYS=
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_TASK_ID" ] && [ -e "$CAPTAIN_POLICY_STATUS_FILE" ]; then
   opened_keys=
-  declared_keys=
   while IFS= read -r policy_line || [ -n "$policy_line" ]; do
     status_line_verb "$policy_line" policy_verb
-    case "$policy_verb" in
-      needs-decision)
-        policy_key=$(_fm_decision_key "$policy_line") || continue
-        declared_keys=" ${declared_keys# } "
-        declared_keys=${declared_keys// $policy_key / }
-        case " $opened_keys " in
-          *" $policy_key "*) ;;
-          *) opened_keys="${opened_keys}${opened_keys:+ }$policy_key" ;;
-        esac
-        ;;
-      note)
-        policy_note=$(status_line_note "$policy_line")
-        case "$policy_note" in
-          "decision-declaration: answered-key="*)
-            declared_keys="$declared_keys ${policy_note#decision-declaration: answered-key=}"
-            ;;
-        esac
-        ;;
+    [ "$policy_verb" = needs-decision ] || continue
+    policy_key=$(_fm_decision_key "$policy_line") || continue
+    case " $opened_keys " in
+      *" $policy_key "*) ;;
+      *) opened_keys="${opened_keys}${opened_keys:+ }$policy_key" ;;
     esac
   done < "$CAPTAIN_POLICY_STATUS_FILE"
   for policy_key in $opened_keys; do
     _fm_open_set_has "$CAPTAIN_POLICY_OPEN_SET" "$policy_key" && continue
-    CAPTAIN_DISCARDED_KEYS="${CAPTAIN_DISCARDED_KEYS}${CAPTAIN_DISCARDED_KEYS:+ }$policy_key"
     case ",$CAPTAIN_POLICY_INVENTORY," in *",$policy_key,"*) continue ;; esac
-    case " $declared_keys " in *" $policy_key "*) continue ;; esac
     fm_send_gate_held_key "$policy_key"
   done
 fi
@@ -770,10 +768,8 @@ for inventory_key in $CAPTAIN_OPEN_HELD_KEYS; do
   esac
 done
 
-FM_SEND_MATCHED_CAPTAIN_ANSWER=
 fm_send_captain_answer_for_key() { # <decision-key>
   local candidate
-  FM_SEND_MATCHED_CAPTAIN_ANSWER=
   fm_send_authoritative_hold "$RESOLVE_TASK_ID" "$1" || return $?
   candidate=$FM_SEND_AUTHORITATIVE_HOLD_ID
   case " $CAPTAIN_ANSWER_IDS " in
@@ -782,7 +778,6 @@ fm_send_captain_answer_for_key() { # <decision-key>
     *" $candidate "*) return 1 ;;
     esac
     if fm_send_captain_answer_recorded "$candidate"; then
-      FM_SEND_MATCHED_CAPTAIN_ANSWER=$candidate
       CAPTAIN_ANSWER_USED_IDS="${CAPTAIN_ANSWER_USED_IDS}${CAPTAIN_ANSWER_USED_IDS:+ }$candidate"
       return 0
     fi
@@ -872,28 +867,14 @@ if [ -n "$RESOLVE_KEYS" ]; then
     esac
     # Not open in the status log. A decision already transferred to its durable
     # captain-held task is exactly this case, and it is answerable - just
-    # through the other ledger - so check there before refusing.
+    # through the other ledger - so check there before refusing. With the
+    # captain-decision flag the captain's own fm-captain-hold answer settles a
+    # held decision, so there is nothing for this send to relay or close.
     if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
-      case ",$CAPTAIN_POLICY_INVENTORY, $CAPTAIN_DISCARDED_KEYS " in
-      *",$k,"* | *" $k "*) : ;;
-      *)
-        echo "error: --resolve-key '$k': no open decision in $RESOLVE_STATUS_FILE and no captain-held decision '$k' in this task's inventory; nothing was sent." >&2
-        exit 1
-        ;;
-      esac
-    fi
-    if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && fm_send_captain_answer_for_key "$k"; then
-      RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
-      RESOLVE_PREANSWERED_HOLD_KEYS="${RESOLVE_PREANSWERED_HOLD_KEYS}${RESOLVE_PREANSWERED_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
-      RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
-      continue
+      echo "error: --resolve-key '$k': no open decision with that key in $RESOLVE_STATUS_FILE. A captain-held decision is settled only by bin/fm-captain-hold.sh answer; once that record exists, send the captain's answer as a plain steer. Nothing was sent." >&2
+      exit 1
     fi
     if resolved_hold_id=$(fm_send_hold_resolved_id "$RESOLVE_TASK_ID" "$k"); then
-      if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
-        fm_send_require_captain_answer "$k" || exit 1
-        RESOLVE_PREANSWERED_HOLD_KEYS="${RESOLVE_PREANSWERED_HOLD_KEYS}${RESOLVE_PREANSWERED_HOLD_KEYS:+ }$FM_SEND_MATCHED_CAPTAIN_ANSWER"
-        RESOLVE_DECISION_KEYS="${RESOLVE_DECISION_KEYS}${RESOLVE_DECISION_KEYS:+ }$k"
-      fi
       RESOLVE_HOLD_KEYS="${RESOLVE_HOLD_KEYS}${RESOLVE_HOLD_KEYS:+ }$resolved_hold_id"
       continue
     fi
@@ -956,10 +937,6 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
   if [ "$NO_DECISION" = 1 ]; then
     [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ] || {
       echo "error: --no-decision requires an open decision; nothing was sent" >&2
-      exit 1
-    }
-    [ -z "$RESOLVE_HOLD_KEYS" ] || {
-      echo "error: --no-decision cannot accompany a captain-held decision answer; nothing was sent" >&2
       exit 1
     }
     for k in $RESOLVE_STATUS_KEYS; do
@@ -1051,12 +1028,8 @@ fm_send_feed_resolved_holds() { # <answer-text>
   [ -n "$RESOLVE_HOLD_KEYS" ] || return 0
   note=$(printf '%s' "$note" | tr '\n\r\t' '   ' | LC_ALL=C tr -d '\000-\037\177')
   for k in $RESOLVE_HOLD_KEYS; do
-    case " $RESOLVE_PREANSWERED_HOLD_KEYS " in
-    *" $k "*) continue ;;
-    esac
     lines="${lines}${k}"$'\t'"${note}"$'\t'$'\n'
   done
-  [ -n "$lines" ] || return 0
   if ! printf '%s' "$lines" | FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
     "$SCRIPT_DIR/fm-captain-hold.sh" answers \
     --source "a firstmate answer sent to $RESOLVE_TASK_ID" >/dev/null 2>&1; then
