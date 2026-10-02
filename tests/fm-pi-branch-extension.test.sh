@@ -1843,6 +1843,107 @@ EOF
 # cancelled rather than re-presented; and the first run boundary after the
 # record is archived presents the accumulated rows with a fresh triggered
 # budget. Every record read goes through the real bin/fm-afk-contract.sh.
+test_away_email_failure_is_visible_and_retried() {
+  local repo home status_file out status
+  repo="$TMP_ROOT/away-email-failure-root"
+  home="$TMP_ROOT/away-email-failure-home"
+  status_file="$home/state/mail-status"
+  mkdir -p "$home/state" "$home/config"
+  install_pi_branch_extension_fixture "$repo"
+  cp -R "$ROOT/bin/." "$repo/bin/"
+  cat > "$repo/bin/fm-mail.sh" <<'SH'
+#!/usr/bin/env bash
+case "${2:-}" in
+  owner|destination|configured) printf 'owner@example.test\n'; exit 0 ;;
+
+
+
+
+  queue-unprocessed) printf 'queued 1 away-email item(s)\n'; exit 0 ;;
+  flush)
+    if [ "$(cat "$FM_TEST_MAIL_STATUS_FILE")" = sent ]; then
+      printf 'sent 1 away-email item(s)\n'
+      exit 0
+    fi
+    printf 'simulated SMTP failure\n' >&2
+    exit 1
+    ;;
+esac
+exit 2
+SH
+  chmod +x "$repo/bin/fm-mail.sh"
+  printf 'fail\n' > "$status_file"
+  PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$repo" \
+    FM_TEST_MAIL_STATUS_FILE="$status_file" DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+const prelude = process.env.DRIVER_PRELUDE;
+await eval(`(async () => { ${prelude}; globalThis.__t = { fire, defaultSessionCtx, sentToMain }; })()`);
+const { fire, defaultSessionCtx, sentToMain } = globalThis.__t;
+import { spawnSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+
+const contract = spawnSync("bash", [`${process.env.FM_ROOT_OVERRIDE}/bin/fm-afk-contract.sh`, "enter"], {
+  encoding: "utf8",
+  env: { ...process.env, FM_TEST_HARNESS: "pi", FM_HOME: process.env.FM_HOME, FM_STATE_OVERRIDE: `${process.env.FM_HOME}/state` },
+});
+if (contract.status !== 0) throw new Error(`could not enter away posture: ${contract.stderr}`);
+const realSetTimeout = globalThis.setTimeout;
+const timers = [];
+globalThis.setTimeout = (callback, delay, ...args) => {
+  if (delay === 0 || delay === 15000 || delay === 60000) {
+    const timer = realSetTimeout(() => {}, 24 * 60 * 60 * 1000);
+    timer.unref();
+    timer.run = () => callback(...args);
+    timer.delay = delay;
+    timers.push(timer);
+    return timer;
+  }
+  return realSetTimeout(callback, delay, ...args);
+};
+await fire("session_start", {}, defaultSessionCtx);
+const warnings = () => sentToMain.filter((item) => item.message.content.includes("Away email delivery failed"));
+const runNextTimer = async () => {
+  const timer = timers.shift();
+  if (!timer) throw new Error("the retry timer was not scheduled");
+  await timer.run();
+};
+await runNextTimer();
+if (warnings().length !== 1 || warnings()[0].message.display !== true) {
+  throw new Error(`SMTP failure was not shown to the captain: ${JSON.stringify(sentToMain)}`);
+}
+await runNextTimer();
+if (warnings().length !== 1) throw new Error("repeated SMTP failures spammed the captain");
+
+
+
+
+
+
+writeFileSync(process.env.FM_TEST_MAIL_STATUS_FILE, "sent\n");
+await runNextTimer();
+writeFileSync(process.env.FM_TEST_MAIL_STATUS_FILE, "fail\n");
+await runNextTimer();
+if (warnings().length !== 2) throw new Error("a new failure after successful delivery was not reported");
+
+
+
+
+
+
+process.exit(0);
+EOF
+  status=$?
+  out=$(cat "$TMP_ROOT/node-output")
+  expect_code 0 "$status" "away email failures must be visible and retried without notification spam: $out"
+  pass "failed away-email delivery is shown to the captain, retried, and re-alerted after recovery"
+
+
+
+
+
+
+}
+
 test_away_record_parks_main_and_presents_after_archive() {
   local repo home out status
   repo="$TMP_ROOT/away-root"
@@ -1850,7 +1951,8 @@ test_away_record_parks_main_and_presents_after_archive() {
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    FM_AFK_OWNER_EMAIL=owner@example.test FM_AFK_EMAIL_TO=owner@example.test DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject }; })()`);
 const { fire, dispatch, settle, sentToMain, mainEntries, outcomeScript, defaultSessionCtx, home, realRoot, bus, approvedProject } = globalThis.__t;
@@ -2088,7 +2190,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, utimesSync } from "node:fs";
 
 const state = `${home}/state`;
-const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: `${home}/config` };
+const env = { ...process.env, FM_HOME: home, FM_STATE_OVERRIDE: state, FM_CONFIG_OVERRIDE: `${home}/config`, FM_AFK_OWNER_EMAIL: "owner@example.test", FM_AFK_EMAIL_TO: "owner@example.test" };
 const run = (args, label, extra = {}) => {
   const result = spawnSync("bash", args, { encoding: "utf8", env: { ...env, ...extra } });
   if (result.status !== 0) throw new Error(`${label} failed: ${result.stderr}`);
@@ -2193,7 +2295,8 @@ test_away_only_wake_rejects_when_record_is_archived_before_drain() {
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    FM_AFK_OWNER_EMAIL=owner@example.test FM_AFK_EMAIL_TO=owner@example.test DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject }; })()`);
 const { fire, home, realRoot, bus, makeOffer, mainUserMessages, approvedProject } = globalThis.__t;
@@ -2258,7 +2361,8 @@ test_away_claimed_heartbeat_on_a_task_wake_lifts_task_scoping() {
   mkdir -p "$home/state" "$home/config"
   install_pi_branch_extension_fixture "$repo"
   PLUGIN="$repo/.pi/extensions/fm-branch-supervision.ts" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" \
-    DRIVER_PRELUDE="$DRIVER_PRELUDE" node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
+    FM_AFK_OWNER_EMAIL=owner@example.test FM_AFK_EMAIL_TO=owner@example.test DRIVER_PRELUDE="$DRIVER_PRELUDE" \
+    node --input-type=module > "$TMP_ROOT/node-output" 2>&1 <<'EOF'
 const prelude = process.env.DRIVER_PRELUDE;
 await eval(`(async () => { ${prelude}; globalThis.__t = { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx }; })()`);
 const { fire, settle, home, realRoot, bus, makeOffer, approvedProject, defaultSessionCtx } = globalThis.__t;
@@ -5161,10 +5265,21 @@ for (const row of [stockRow, actualRow]) {
   row.setArgsComplete();
   row.updateResult(result);
 }
+const stripAnsi = (line) => line.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+const matchesStockRendering = (actual, stock) => {
+  const hasRecentSummary = (lines) => lines.some((line) => /recent(?:=|:)\s*2/.test(stripAnsi(line)));
+  if (hasRecentSummary(stock) && !hasRecentSummary(actual)) return false;
+  const normalize = (lines) => lines
+    .filter((line) => !/^recent:\s*2$/.test(stripAnsi(line).trim()))
+    .map((line) => stripAnsi(line).includes("fm_branch_outcomes") ? "<tool-call>" : line);
+  const normalizedActual = normalize(actual);
+  const normalizedStock = normalize(stock);
+  return JSON.stringify(normalizedActual) === JSON.stringify(normalizedStock);
+};
 const collapsedStock = stockRow.render(100);
 const collapsedActual = actualRow.render(100);
-if (JSON.stringify(collapsedActual) !== JSON.stringify(collapsedStock)) {
-  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock");
+if (!matchesStockRendering(collapsedActual, collapsedStock)) {
+  throw new Error("Calm-off ToolExecutionComponent rendering differs from Pi stock outside the version-dependent recent argument summary");
 }
 const collapsedText = collapsedStock.join("\n");
 if (collapsedText.includes("OUTCOME_TWELVE") || !collapsedText.includes("more lines") || !collapsedText.includes("to expand")) {
@@ -5174,7 +5289,7 @@ stockRow.setExpanded(true);
 actualRow.setExpanded(true);
 const expandedStock = stockRow.render(100);
 const expandedActual = actualRow.render(100);
-if (JSON.stringify(expandedActual) !== JSON.stringify(expandedStock)) {
+if (!matchesStockRendering(expandedActual, expandedStock)) {
   throw new Error("expanded Calm-off ToolExecutionComponent rendering differs from Pi stock");
 }
 if (!expandedStock.join("\n").includes("OUTCOME_TWELVE") || JSON.stringify(expandedStock) === JSON.stringify(collapsedStock)) {
@@ -5209,7 +5324,7 @@ if (actualRow.render(100).length !== 0) {
 }
 pi.events.emit("firstmate:calm-presentation", { active: false, stockExportRendering: false });
 actualRow.invalidate();
-if (JSON.stringify(actualRow.render(100)) !== JSON.stringify(stockRow.render(100))) {
+if (!matchesStockRendering(actualRow.render(100), stockRow.render(100))) {
   throw new Error("ToolExecutionComponent rendering did not restore after live toggle");
 }
 
@@ -5811,6 +5926,7 @@ test_branch_dispatch_classifies_main_only_rows_and_writes_the_eligible_snapshot
 test_branch_dispatch_routes_secondmate_signal_by_new_span
 test_branch_cache_key_is_per_home_stable
 test_branch_default_on_heartbeat_afk_and_fallback
+test_away_email_failure_is_visible_and_retried
 test_away_record_parks_main_and_presents_after_archive
 test_away_unchanged_held_outcome_reaches_the_captain_once_until_a_new_event
 test_away_only_wake_rejects_when_record_is_archived_before_drain

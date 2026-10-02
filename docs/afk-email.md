@@ -1,0 +1,69 @@
+# Away email for Firstmate
+
+Firstmate's `/afk` away posture can send captain-facing outcomes by email and accept a reply for one specific outcome.
+
+Email is optional and does not change which actions the away session is authorized to take.
+The email delivery path is currently available to Pi supervision branches; other primary harnesses retain their existing away behavior.
+
+## Setup
+
+Use a dedicated sending mailbox if practical, and create an app password for it rather than using your normal account password.
+
+Add the following values to this Firstmate home's gitignored `.env`:
+
+```sh
+FM_MAIL_USER=mailbox@example.com
+FM_MAIL_PASS=your-mailbox-app-password
+FM_IMAP_HOST=imap.gmail.com
+FM_SMTP_HOST=smtp.example.com
+FM_AFK_OWNER_EMAIL={user's name@emailhost}
+FM_AFK_EMAIL_TO={user's name@emailhost}
+```
+
+Replace `{user's name@emailhost}` with the same owner address in both settings.
+`FM_MAIL_USER`, `FM_MAIL_PASS`, `FM_IMAP_HOST`, and `FM_SMTP_HOST` are the existing mail-plane settings.
+`FM_AFK_OWNER_EMAIL` is the only address that can receive away alerts and authenticate an away reply.
+`FM_AFK_EMAIL_TO` must exactly match `FM_AFK_OWNER_EMAIL`; a different destination is refused.
+The receiving IMAP mailbox must be Gmail at `imap.gmail.com`, so the topmost `Authentication-Results` field can be trusted as Gmail's receiver-generated result.
+
+The mail plane requires implicit TLS on IMAP port 993 and SMTP port 465 by default; STARTTLS and port 587 are not supported.
+Set `FM_IMAP_PORT` or `FM_SMTP_PORT` only when your provider uses different implicit-TLS ports.
+
+Arm received-mail polling once in this home:
+
+```sh
+bin/fm-mail-check.sh arm
+```
+
+Then enter `/afk` and confirm its read-back says email reach is active.
+If the owner address or destination is missing or invalid, entry is refused; if mail transport is incomplete or invalid, away mode keeps its hold-for-return behavior.
+
+No credential needs to be shared with Firstmate.
+
+## Replies and limits
+
+Captain-facing supervision outcomes are grouped into plain-text email updates, with full pull-request URLs when present and a short one-time reply code for each item.
+To answer an item, reply from the exact configured owner address and make the first non-empty line exactly `FM-AFK-REPLY FM-AFK-<code>`; put your words on the following lines before any quoted message.
+Only inline `text/plain` content is parsed; attachments and embedded forwarded messages are excluded, and recognized quoted-history markers end answer extraction.
+A message body is read only when its single `From` address exactly matches the configured owner and the topmost `Authentication-Results` field is the Gmail receiver's result (`mx.google.com`) showing DKIM or DMARC pass aligned with `gmail.com`; lower sender-supplied copies are ignored.
+Other senders and messages without that authenticated result are silently ignored without a body read or mail wake.
+
+While away, the poller walks unseen mail in ascending UID order from a persistent away-scan cursor; ignored mail is examined at most once per away posture, stays unread, and cannot block later replies, so attended polling reports it after return.
+Failed reads of authenticated owner replies remain retryable.
+A failed read of a message, an owner reply that arrives while mail configuration is missing, or a reply handoff that fails or runs past the poll budget is retried on later polls without blocking the scan; after three failed reads of an authenticated owner reply the poller stops retrying it and sends a content-free alert that a reply could not be read.
+
+If an away record is present but invalid or unreadable, AFK-email polling defers all incoming mail, including authenticated replies, until the record is valid.
+The separate `fm-mail.sh read` path continues to apply its own authenticated-body restriction during away mode.
+Each code is accepted only for its own sent item, once, and for seven days after sending.
+Correctly authenticated owner messages larger than 256 KiB total, including attachments, are not processed as away-mode replies, but receive an ordinary mail wake marked that the body exceeds the limit.
+Replies over 8,000 characters are rejected with a notice in the durable mail wake.
+
+A matching reply enters Firstmate's existing captain inbox as words for that outcome.
+An authenticated owner message with a missing, invalid, expired, or already-used code follows the ordinary mail wake path and is never treated as verified instructions.
+The email footer states the same safety boundary: replies never authorize destructive, irreversible, or security-sensitive actions, which still require your return or trusted-channel confirmation.
+
+Away updates are batched, with a minimum interval of one message per minute.
+If another batch is ready sooner, it remains queued until the interval expires.
+
+Email transport settings and received-mail polling are owned by the [Mail plane](configuration.md#mail-plane-env).
+The durable away-posture reach selection and its hold-for-return fallback are owned by `bin/fm-afk-contract.sh` and the [`/afk` skill](../.agents/skills/afk/SKILL.md).

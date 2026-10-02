@@ -146,6 +146,13 @@ const mirrorCursorFile = join(state, ".branch-mirror-cursor");
 const promptScript = join(fmRoot, "bin", "fm-branch-prompt.sh");
 const afkContractScript = join(fmRoot, "bin", "fm-afk-contract.sh");
 const outcomeScript = join(fmRoot, "bin", "fm-branch-outcome.sh");
+const mailScript = join(fmRoot, "bin", "fm-mail.sh");
+
+
+
+
+
+
 const leaseScript = join(fmRoot, "bin", "fm-lease.sh");
 const wakeGrantScript = join(fmRoot, "bin", "fm-wake-grant.sh");
 const loadedMarker = join(state, ".pi-branch-extension-loaded");
@@ -635,6 +642,48 @@ export default function (pi: ExtensionAPI) {
       () => {},
     );
     return queued;
+  }
+  const AFK_EMAIL_DEBOUNCE_MS = 15000;
+  const AFK_EMAIL_RETRY_MS = 60000;
+  let afkEmailFailureNotified = false;
+  let afkEmailFlushTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function scheduleAfkEmailFlush(delayMs = AFK_EMAIL_DEBOUNCE_MS): void {
+    if (afkEmailFlushTimer) return;
+    afkEmailFlushTimer = setTimeout(async () => {
+      afkEmailFlushTimer = undefined;
+      if (!afkPostureRecordPresent(state)) return;
+      const queued = await runCommandAsync(mailScript, ["afk-email", "queue-unprocessed"], { env: scriptEnv });
+      const flushed = await runCommandAsync(mailScript, ["afk-email", "flush"], { env: scriptEnv });
+      if (queued.status === 0 && flushed.status === 0) afkEmailFailureNotified = false;
+      if (!afkPostureRecordPresent(state)) return;
+      if (queued.status !== 0 || flushed.status !== 0) {
+        if (!afkEmailFailureNotified) {
+          afkEmailFailureNotified = true;
+          deliverBranchHealthNote("Away email delivery failed; captain outcomes remain durably stored and will be retried.");
+        }
+
+
+
+
+
+
+
+
+
+
+
+        scheduleAfkEmailFlush(AFK_EMAIL_RETRY_MS);
+        return;
+      }
+      const deferred = flushed.stdout.match(/^deferred ([0-9]+)s/m);
+      if (deferred) {
+        scheduleAfkEmailFlush(Math.max(1000, Number(deferred[1]) * 1000 + 250));
+      } else if (/^sent [1-9][0-9]* away-email item/m.test(flushed.stdout)) {
+        scheduleAfkEmailFlush(AFK_EMAIL_RETRY_MS);
+      }
+    }, delayMs);
+    afkEmailFlushTimer.unref?.();
   }
   const pendingMirror: MirrorItem[] = [];
   const mirrorCollection: MirrorCollectionState = {
@@ -1252,6 +1301,7 @@ export default function (pi: ExtensionAPI) {
             };
           }
           durableReportRevision += 1;
+          if (afkPostureRecordPresent(state)) scheduleAfkEmailFlush();
           const seq = Number(appended.stdout);
           if (!Number.isSafeInteger(seq) || seq < 1 || !(await reconcileUnreadOutcomes(toolGeneration))) {
             return {
@@ -1719,6 +1769,7 @@ ${context.command}
     await enqueueDelivery(async () => {
       if (!(await actingAsOwner(settledGeneration))) return;
       await presentUnprocessedOutcomes(settledGeneration);
+      if (afkPostureRecordPresent(state)) scheduleAfkEmailFlush();
     });
   });
 
@@ -1785,6 +1836,7 @@ ${context.command}
     if (failed && startedGeneration === generation) {
       branchBroken = "could not reconcile unread supervision outcomes into main";
     }
+    if (afkPostureRecordPresent(state)) scheduleAfkEmailFlush(0);
   });
 
   // Pi emits this for /model, Ctrl+P cycling, and session restore, so it is

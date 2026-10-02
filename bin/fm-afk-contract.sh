@@ -8,9 +8,11 @@
 # the home is afk; the captain's first unmarked message archives it (the return
 # path in bin/fm-afk-return.sh calls `archive` through bin/fm-afk-launch.sh stop).
 # Being away changes how the captain is informed and what happens at a
-# captain-owned decision point, never the authority set. Hold-for-return is the
-# only reach profile this release records: there is no phone channel, and the
-# entry announcement says so every time.
+# captain-owned decision point, never the authority set. A Pi entry requires
+# FM_AFK_EMAIL_TO to exactly match the home's FM_AFK_OWNER_EMAIL; email reach
+# is recorded only when the full mail plane is configured, otherwise the exact
+# hold-for-return fallback remains in force.
+
 #
 # AWAY OR QUIET. The same record also backs daemon-backed quiet mode, which a
 # quiet entry marks with `mode: quiet`: the captain is present there, so a quiet
@@ -23,6 +25,7 @@
 # entry over no record or over a quiet record writes one: an away entry over a
 # quiet record, a refresh included, rewrites it as away, and a quiet entry never
 # turns a standing away record quiet (the captain's return comes first).
+
 #
 # ENTRY IS THE GO. `/afk` itself is the captain's go: `enter` writes the record
 # in the same turn, before any other work, and never waits for a further human
@@ -46,11 +49,11 @@
 #
 # RECORD (state/.afk-contract; written only by this script; YAML-shaped so a
 # human can read it, but parsed only here - consumers use the read subcommands):
-#   version: 2
+#   version: 3
 #   entered: <UTC ISO 8601>
 #   entered_epoch: <seconds>
 #   expected_return: <UTC ISO 8601> | -
-#   reach_channels: none
+#   reach_channels: none|email
 #   reach_announced: <the one-sentence reach announcement>
 #   spend_max_concurrent_workers: <n>
 #   confirmed: <UTC ISO 8601>       when this mandate was recorded; /afk itself
@@ -61,14 +64,14 @@
 #     <line>                       one record line per input line (or `words: -`
 #     ...                          when /afk carried no words); `|` retains a
 #                                  final newline and `|-` records its absence
-# The words block runs to the end of a version 2 record; in a version 1 record
-# only its legacy clauses:, refused:, and merge_grants: sections end it. Any
-# other line after the header that is not a stored line is damage, not a
+# The words block runs to the end of a version 2 or later record; in a version
+# 1 record only its legacy clauses:, refused:, and merge_grants: sections end it.
+# Any other line after the header that is not a stored line is damage, not a
 # boundary, so a truncated mandate can never read as a whole one.
-# A version 1 record (the retired clause model) still validates and reads: its
-# scalar fields and words are read exactly as above, and its clauses:, refused:,
-# and merge_grants: sections are ignored, so an upgrade never breaks a live away
-# window. Only version 2 is ever written.
+# Version 1 records (the retired clause model) and version 2 records still
+# validate and read unchanged; their clauses:, refused:, and merge_grants:
+# sections are ignored, so an upgrade never breaks a live away window. Only
+# version 3 is ever written.
 # The retired two-step entry staged a proposal at state/.afk-contract.proposed;
 # no proposal is written any more, and `enter` removes one an older version left
 # behind. Archived final records live under state/afk-contracts/ as
@@ -103,20 +106,22 @@
 #
 # CROSS-SUBSYSTEM LOCK (state/.afk-contract.lock; this script is its one owner).
 # This record is authority another subsystem reads and then ACTS on outside this
-# script: bin/fm-pr-merge.sh reads an away record as away merge authority
-# and afterwards hands a merge to the forge. A publication, replacement, or
-# archive landing between that read and the forge handoff would land a merge on
-# authority that no longer holds, so the two subsystems share one lock instead of
-# each locking its own records: the record-mutating subcommands (enter,
-# archive) hold it across their mutation, and a reader that acts on the record
-# holds it across both its read and that action (fm_afk_contract_lock_hold /
-# fm_afk_contract_lock_release). The read-only subcommands never take it, so a
-# holder can still read the record it locked. Neither side ever proceeds without
-# it: the acquire is bounded, and a bound that is hit refuses and names the live
-# holder rather than racing. That fixed bound is 120 seconds, sized so only a
-# genuinely wedged holder trips it. A lock left by a killed process is reclaimed
-# by the ordinary stale-owner recovery in bin/fm-wake-lib.sh, which owns the lock
-# primitive itself.
+# script: bin/fm-pr-merge.sh reads the record's presence as away merge authority
+
+# and afterwards hands a merge to the forge; bin/fm-afk-email.py validates the
+# live posture before an outbound flush or verified inbound reply handoff. A
+# publication, replacement, or archive landing between that read and the side
+# effect could authorize an action after the posture ended, so the writer and
+# each acting reader share one lock instead of locking separate records: the
+# record-mutating subcommands (enter, archive) hold it across their mutation,
+# and an acting reader holds it across both its read and side effect
+# (fm_afk_contract_lock_hold / fm_afk_contract_lock_release). Read-only
+# subcommands never take it, so a holder can still read the record it locked.
+# Neither side proceeds without it: acquisition is bounded, and a bound that is
+# hit refuses and names the live holder rather than racing. That fixed bound is
+# 120 seconds, sized so only a genuinely wedged holder trips it. A lock left by
+# a killed process is reclaimed by the ordinary stale-owner recovery in
+# bin/fm-wake-lib.sh, which owns the lock primitive itself.
 #
 # Sourceable: with the BASH_SOURCE guard, other scripts get the path, presence,
 # posture, and lock helpers (fm_afk_contract_path, fm_afk_contract_present,
@@ -133,9 +138,10 @@ FM_AFK_CONTRACT_STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$FM_AFK_CONTRACT_DIR/fm-classify-lib.sh"
 
-FM_AFK_CONTRACT_VERSION=2
+FM_AFK_CONTRACT_VERSION=3
 # Older record versions this script still reads (never writes).
-FM_AFK_CONTRACT_READABLE_VERSIONS="1 2"
+FM_AFK_CONTRACT_READABLE_VERSIONS="1 2 3"
+FM_AFK_CONTRACT_REACH_CHANNELS=none
 FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
 FM_AFK_CONTRACT_SPEND_DEFAULT=4
 FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING='you are present, so nothing waits for your return: every action you ask for, a local landing or a merge included, proceeds now under ordinary attended authority, and quiet mode changes only which updates reach this conversation.'
@@ -257,7 +263,7 @@ fm_afk_contract_render_record() {  # <entered-iso> <entered-epoch> <confirmed-is
   printf 'entered: %s\n' "$entered"
   printf 'entered_epoch: %s\n' "$entered_epoch"
   printf 'expected_return: %s\n' "${EXPECTED_RETURN:--}"
-  printf 'reach_channels: none\n'
+  printf 'reach_channels: %s\n' "$FM_AFK_CONTRACT_REACH_CHANNELS"
   printf 'reach_announced: %s\n' "$FM_AFK_CONTRACT_REACH_ANNOUNCED"
   printf 'spend_max_concurrent_workers: %s\n' "${SPEND:-$FM_AFK_CONTRACT_SPEND_DEFAULT}"
   printf 'confirmed: %s\n' "$confirmed"
@@ -353,7 +359,10 @@ fm_afk_contract_validate() {  # <path>
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   [ "$expected" = - ] || fm_afk_contract_validate_iso "$expected" || { fm_afk_contract_log "record $path has no valid expected_return"; return 1; }
   reach=$(fm_afk_contract_read_field "$path" reach_channels)
-  [ "$reach" = none ] || { fm_afk_contract_log "record $path has no valid reach_channels"; return 1; }
+  case "$version:$reach" in
+    1:none|2:none|3:none|3:email) ;;
+    *) fm_afk_contract_log "record $path has no valid reach_channels"; return 1 ;;
+  esac
   announced=$(fm_afk_contract_read_field "$path" reach_announced)
   [ -n "$announced" ] || { fm_afk_contract_log "record $path has no reach announcement"; return 1; }
   spend=$(fm_afk_contract_read_field "$path" spend_max_concurrent_workers)
@@ -395,8 +404,12 @@ fm_afk_contract_render_readback() {  # <path>
     printf '  entered: %s\n' "$(fm_afk_contract_read_field "$path" entered)"
     printf '  expected return: %s\n' "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")"
     printf '  spend cap: %s concurrent workers\n' "$spend"
-    printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)"
+    case "$(fm_afk_contract_read_field "$path" reach_channels)" in
+      email) printf '  reach: email. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)" ;;
+      *) printf '  reach: hold-for-return only. %s\n' "$(fm_afk_contract_read_field "$path" reach_announced)" ;;
+    esac
   fi
+
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
   if [ -n "$words" ]; then
@@ -409,12 +422,13 @@ fm_afk_contract_render_readback() {  # <path>
 }
 
 fm_afk_contract_render_announcement() {  # <path>
-  local path=$1 expected words mandate_text
+  local path=$1 expected words mandate_text reach_label
   if [ "$(fm_afk_contract_record_mode "$path")" = quiet ]; then
     printf 'Quiet mode recorded at %s: %s Only an explicit /quiet off ends it.\n' \
       "$(fm_afk_contract_read_field "$path" confirmed)" "$FM_AFK_CONTRACT_QUIET_HOLDS_NOTHING"
     return 0
   fi
+
   expected=$(fm_afk_contract_read_field "$path" expected_return)
   words=$(fm_afk_contract_read_words "$path"; rc=$?; printf x; exit "$rc") || return 1
   words=${words%x}
@@ -423,8 +437,19 @@ fm_afk_contract_render_announcement() {  # <path>
   else
     mandate_text='No away instructions were recorded; the away session acts on standing authority only, and anything that needs you waits for your return.'
   fi
-  printf 'Away posture recorded at %s: hold-for-return only. %s %s Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: %s. Spend cap: %s concurrent workers.\n' \
+  if [ "$(fm_afk_contract_read_field "$path" reach_channels)" = email ]; then
+    reach_label='email reach active.'
+    if [ -n "$words" ]; then
+      mandate_text='Your away instructions are recorded verbatim; the away session will carry them out where it can, and anything it is unsure of, or that needs you, is sent by email where possible and otherwise waits for your return.'
+    else
+      mandate_text='No away instructions were recorded; the away session acts on standing authority only, and captain-facing items are emailed where possible or wait for your return.'
+    fi
+  else
+    reach_label='hold-for-return only.'
+  fi
+  printf 'Away posture recorded at %s: %s %s %s Destructive, irreversible, and security-sensitive actions are never pre-authorizable, whatever the words say. Expected return: %s. Spend cap: %s concurrent workers.\n' \
     "$(fm_afk_contract_read_field "$path" confirmed)" \
+    "$reach_label" \
     "$(fm_afk_contract_read_field "$path" reach_announced)" \
     "$mandate_text" \
     "$( [ "$expected" = - ] && printf 'not given' || printf '%s' "$expected")" \
@@ -500,14 +525,41 @@ fm_afk_contract_archive_target() {  # <record> [superseded-stamp]
 # follows the header's AWAY OR QUIET rules.
 fm_afk_contract_cmd_enter() {
   local record legacy now now_epoch session_entered session_entered_epoch staged archived archived_tmp standing=''
+  local harness destination owner_email require_owner_destination
+
   record=$(fm_afk_contract_path)
   legacy=$(fm_afk_contract_legacy_proposal_path)
   FM_AFK_CONTRACT_ENTRY_MODE=away
   [ "${FM_AFK_MODE:-}" != quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=quiet
+
+  harness=$("$FM_AFK_CONTRACT_DIR/fm-harness.sh" 2>/dev/null || printf unknown)
+  require_owner_destination=0
+  case "$harness" in
+    pi|pi-signed) require_owner_destination=1 ;;
+  esac
+  if [ -f "$record" ] && [ "$(fm_afk_contract_read_field "$record" reach_channels)" = email ]; then
+    require_owner_destination=1
+  fi
   if [ -f "$record" ]; then
     fm_afk_contract_validate "$record" || return 1
     standing=$(fm_afk_contract_record_mode "$record")
     [ "$standing" = quiet ] || FM_AFK_CONTRACT_ENTRY_MODE=away
+  fi
+  if [ "$require_owner_destination" -eq 1 ] && [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ]; then
+    owner_email=$(
+      "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email owner 2>/dev/null || true
+    )
+    if [ -z "$owner_email" ]; then
+      fm_afk_contract_log 'FM_AFK_OWNER_EMAIL is missing or invalid; refusing entry'
+      return 1
+    fi
+    destination=$(
+      "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email destination 2>/dev/null || true
+    )
+    if [ "$destination" != "$owner_email" ]; then
+      fm_afk_contract_log 'FM_AFK_EMAIL_TO must exactly match FM_AFK_OWNER_EMAIL for Pi away mode; refusing entry'
+      return 1
+    fi
   fi
   if [ -f "$record" ] && [ -z "$WORDS" ] && [ "$standing" = "$FM_AFK_CONTRACT_ENTRY_MODE" ]; then
     if [ "$standing" = quiet ]; then
@@ -534,6 +586,17 @@ fm_afk_contract_cmd_enter() {
     session_entered_epoch=$(fm_afk_contract_read_field "$record" entered_epoch)
   fi
   mkdir -p "$(dirname "$record")" || return 1
+  FM_AFK_CONTRACT_REACH_CHANNELS=none
+  FM_AFK_CONTRACT_REACH_ANNOUNCED='No phone channel is configured; anything that needs you waits for your return.'
+  case "$harness" in
+    pi|pi-signed)
+      if [ "$FM_AFK_CONTRACT_ENTRY_MODE" = away ] && [ -x "$FM_AFK_CONTRACT_DIR/fm-mail.sh" ] \
+        && "$FM_AFK_CONTRACT_DIR/fm-mail.sh" afk-email configured >/dev/null 2>&1; then
+        FM_AFK_CONTRACT_REACH_CHANNELS=email
+        FM_AFK_CONTRACT_REACH_ANNOUNCED='Captain-facing outcomes are emailed to the configured address; replies with a current item code reach the away session.'
+      fi
+      ;;
+  esac
   staged=$(mktemp "$(dirname "$record")/.afk-contract.entering.XXXXXX") || return 1
   fm_afk_contract_render_record "$session_entered" "$session_entered_epoch" "$now" "$now_epoch" > "$staged" \
     || { rm -f "$staged"; return 1; }

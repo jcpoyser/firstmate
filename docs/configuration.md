@@ -194,6 +194,8 @@ While attended, a captain-facing branch outcome (verdict `captain`) is saved as 
 It then opens one processing turn on main for that sequence.
 The turn stays open until main acknowledges the sequence through its `fm_branch_processed` tool.
 While away, the entry is saved, but processing waits until the away-posture record is archived.
+The `/afk` skill's optional email delivery is documented in [Away email](afk-email.md).
+
 The branch prompt's "Verdict: routine or captain" section owns the distinction between captain-facing, unsolicited routine, and unchanged-review outcomes.
 
 The generated [Pi supervision protocol](supervision-protocols/pi.md) owns main's event ownership, acknowledgement duty, and conversational treatment for merged outcomes, while the persisted entry itself owns captain visibility.
@@ -1393,11 +1395,12 @@ Arm the check once per home with `bin/fm-tool-update-check.sh arm`.
 
 ## Mail plane (.env)
 
-The mail plane (bin/fm-mail.sh) reads unseen IMAP messages and sends one SMTP message.
+The mail plane (`bin/fm-mail.sh`) reads unseen IMAP messages and sends one SMTP message.
 
 **Polling and delivery guarantees**
+Its `poll` command surfaces each eligible message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
+Away-mode sender filtering and authenticated-body rules are documented in [Away email](afk-email.md).
 
-Its `poll` command surfaces each new message as a durable `check: mail <uid>` wake, which is also what the standing received-mail check runs each watcher cycle.
 Poll emission is exactly-once-recovering: a published wake always carries a durable journal record, and a poll interrupted before recording its uid is healed from that journal, so inbound mail is never silently missed.
 
 A duplicate wake is possible if the process is killed between the queue append and the journal write and the drain acknowledges that row before the next poll heals it, or under a triple write fault that leaves a queued row with no durable record; neither case drops mail.
@@ -1410,7 +1413,7 @@ STARTTLS and port 587 are not supported.
 It is off unless the home's gitignored `.env` provides the connection values.
 This section is the single owner of the mail-plane configuration schema; for direct invocations, environment values override `.env`, matching the Relay contract.
 
-Required, in the home's gitignored `.env`:
+Required mail transport values, in the home's gitignored `.env`:
 
 ```sh
 FM_MAIL_USER=   # IMAP/SMTP login
@@ -1419,8 +1422,12 @@ FM_IMAP_HOST=   # IMAP server hostname
 FM_SMTP_HOST=   # SMTP server hostname
 ```
 
-`FM_IMAP_PORT` (default 993), `FM_SMTP_PORT` (default 465), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+Firstmate's optional `/afk` email reach uses `FM_AFK_OWNER_EMAIL` as the configured owner identity and requires `FM_AFK_EMAIL_TO` to match it; [Away email](afk-email.md) owns the setup gate and Gmail receiving-mailbox requirement.
+
+`FM_IMAP_PORT` (default 993; integer 1..65535), `FM_SMTP_PORT` (default 465; integer 1..65535), `FM_MAIL_TIMEOUT` (default 20 seconds), and `FM_MAIL_POLL_MAX_WAKES` (default 20, valid 1..200) are optional.
+
 The per-poll wake cap bounds the wakes of one `poll` run; header fetches scan a larger bounded window of new unseen uids plus already-surfaced retry-set uids, so a flood or large backlog still makes bounded progress every poll, keeping the durable wake queue bounded without ever dropping mail.
+`FM_MAIL_POLL_BUDGET` (default 6 seconds; the mail check sets half its own budget) is one wall-clock bound on a poll's IMAP work from connect through every fetch, and caps each socket timeout; a poll that reaches it hands off what it already fetched and leaves the remaining candidates for the next poll.
 
 **Unfetchable headers**
 
@@ -2212,7 +2219,7 @@ The runner proves exactly one durability boundary: output that reached the runne
 The spoken interface in [`docs/voice-relay.md`](voice-relay.md) and the model-backed subcommands of `bin/fm-inbox.sh` reach a paid API in a named account, so no region, model id or AWS profile is shipped as a tracked default.
 Each is one line in a local, gitignored `config/` file, with an environment variable that overrides it for a single run, and a missing required value refuses with the path to write rather than falling back to a value that belongs to another home.
 
-That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list` and `drain` need no configuration at all because they make no model call.
+That configuration is the whole opt-in: an unconfigured home cannot start the relay and cannot run `fm-inbox.sh say` or `ask`, while `note`, `announce`, `reply`, `receipts`, `ready`, `status`, `list`, `show` and `drain` need no configuration at all because they make no model call.
 The voice handover depends on `note`, so it keeps working in a home that has configured nothing.
 
 | File | Environment | Holds |
@@ -2315,6 +2322,9 @@ FM_IMAP_HOST=      # mail-plane IMAP server hostname
 FM_IMAP_PORT=993   # mail-plane IMAP server port
 FM_SMTP_HOST=      # mail-plane SMTP server hostname
 FM_SMTP_PORT=465   # mail-plane SMTP server port
+FM_AFK_OWNER_EMAIL=  # /afk email owner identity; see docs/afk-email.md
+FM_AFK_EMAIL_TO=      # /afk destination; must match FM_AFK_OWNER_EMAIL
+
 FMX_PAIRING_TOKEN=      # Relay pairing token; .env opt-in authorizes replies and eligible lifecycle actions
 FMX_RELAY_URL=https://myfirstmate.io   # optional Relay endpoint override, mainly for local relay development
 FMX_ENV_FILE=           # optional alternate .env file for direct Relay client invocations; bootstrap still checks $FM_HOME/.env

@@ -88,8 +88,10 @@ if [ -f "$ENV_FILE" ]; then
     key="${line%%=*}"
     key="${key#"${key%%[![:space:]]*}"}"
     val="${line#*=}"
-    val="${val#"${val%%[![:space:]]*}"}"
-    val="${val%"${val##*[![:space:]]}"}"
+    if [ "$key" != FM_AFK_EMAIL_TO ] && [ "$key" != FM_AFK_OWNER_EMAIL ]; then
+      val="${val#"${val%%[![:space:]]*}"}"
+      val="${val%"${val##*[![:space:]]}"}"
+    fi
     case "$val" in
       \"*\") val=${val#\"}; val=${val%\"} ;;
       \'*\') val=${val#\'}; val=${val%\'} ;;
@@ -101,28 +103,41 @@ if [ -f "$ENV_FILE" ]; then
 fi
 
 for r in FM_MAIL_USER FM_MAIL_PASS FM_IMAP_HOST FM_SMTP_HOST; do
-  if [ -z "${!r:-}" ]; then
+  if [ "${1:-}" != afk-email ] && ! [[ "${!r:-}" =~ [^[:space:]] ]]; then
+
     echo "fm-mail: missing required \$FM_HOME/.env value: $r" >&2
     echo "fm-mail: add $r (and the other three FM_MAIL_* values) to $ENV_FILE" >&2
     exit 1
   fi
 done
-IMAP_HOST="$FM_IMAP_HOST"
+IMAP_HOST="${FM_IMAP_HOST:-}"
 IMAP_PORT="${FM_IMAP_PORT:-993}"
-SMTP_HOST="$FM_SMTP_HOST"
+SMTP_HOST="${FM_SMTP_HOST:-}"
 SMTP_PORT="${FM_SMTP_PORT:-465}"
-case "$IMAP_PORT" in
-  ''|*[!0-9]*|0)
-    echo "fm-mail: FM_IMAP_PORT must be a positive integer, got: ${FM_IMAP_PORT:-}" >&2
-    exit 1
-    ;;
-esac
-case "$SMTP_PORT" in
-  ''|*[!0-9]*|0)
-    echo "fm-mail: FM_SMTP_PORT must be a positive integer, got: ${FM_SMTP_PORT:-}" >&2
-    exit 1
-    ;;
-esac
+validate_mail_port() {
+  local name=$1 value=$2 normalized=$2
+  case "$value" in
+    ''|*[!0123456789]*)
+      echo "fm-mail: $name must be an integer from 1 through 65535, got: $value" >&2
+      return 1
+      ;;
+  esac
+  while [ "${normalized#0}" != "$normalized" ]; do
+    normalized=${normalized#0}
+  done
+  if [ -z "$normalized" ] || [ "${#normalized}" -gt 5 ] || {
+    [ "${#normalized}" -eq 5 ] && [ "$normalized" -gt 65535 ];
+  }; then
+    echo "fm-mail: $name must be an integer from 1 through 65535, got: $value" >&2
+    return 1
+  fi
+  return 0
+}
+if [ "${1:-}" != afk-email ] || { [ "${2:-}" != destination ] && [ "${2:-}" != owner ]; }; then
+  validate_mail_port FM_IMAP_PORT "$IMAP_PORT" || exit 1
+  validate_mail_port FM_SMTP_PORT "$SMTP_PORT" || exit 1
+
+fi
 MAIL_MAX_WAKES="${FM_MAIL_POLL_MAX_WAKES:-20}"
 case "$MAIL_MAX_WAKES" in
   ''|*[!0-9]*|0) MAIL_MAX_WAKES=20 ;;
@@ -165,17 +180,32 @@ RETRY_POS="$STATE_DIR/.mail-retry-pos"
 # retry recovery) at cap 1; cleared with the retry machinery on a generation
 # change so a new mailbox starts with new mail first.
 TURN="$STATE_DIR/.mail-turn"
+# Away-posture scan cursor: the highest uid examined while away, keyed to the
+# mailbox generation and away entry, so each uid is fetched at most once per
+# away posture and ignored mail stays out of the cursor above.
+AWAY_SCAN="$STATE_DIR/.mail-away-scan"
 
 # Invoke the python engine with the resolved endpoints, cursor, and cap in the
 # environment so credentials never reach argv.
 run_py() {
-  FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
+  env FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" FM_MAIL_USER="$FM_MAIL_USER" FM_MAIL_PASS="$FM_MAIL_PASS" \
   FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
   FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
   FM_MAIL_CURSOR="$CURSOR" FM_MAIL_RETRY="$RETRY" \
   FM_MAIL_RETRY_POS="$RETRY_POS" FM_MAIL_TURN="$TURN" \
+  FM_MAIL_AWAY_SCAN="$AWAY_SCAN" \
   FM_MAIL_POLL_MAX_WAKES="$MAIL_MAX_WAKES" \
+  FM_AFK_EMAIL_TO="${FM_AFK_EMAIL_TO:-}" FM_AFK_OWNER_EMAIL="${FM_AFK_OWNER_EMAIL:-}" \
     "$PY" "$PY_BIN" "$@"
+}
+
+run_afk_email() {
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE_DIR" \
+  FM_MAIL_USER="${FM_MAIL_USER:-}" FM_MAIL_PASS="${FM_MAIL_PASS:-}" \
+  FM_IMAP_HOST="$IMAP_HOST" FM_IMAP_PORT="$IMAP_PORT" \
+  FM_SMTP_HOST="$SMTP_HOST" FM_SMTP_PORT="$SMTP_PORT" \
+  FM_AFK_EMAIL_TO="${FM_AFK_EMAIL_TO:-}" FM_AFK_OWNER_EMAIL="${FM_AFK_OWNER_EMAIL:-}" \
+    "$PY" "$SCRIPT_DIR/fm-afk-email.py" "$@"
 }
 
 usage() {
@@ -184,12 +214,20 @@ fm-mail.sh read
 fm-mail.sh send <to> <subject> <body | ->
 fm-mail.sh poll
 fm-mail.sh status
+fm-mail.sh afk-email owner|destination|configured|queue-unprocessed|flush|verify-note <id>
+
 EOF
 }
 
 mail_seen() {
   # $1 = uid; returns 0 when the cursor already records the uid as surfaced.
   grep -Fqx "$1" "$CURSOR"
+}
+
+mail_cursor_add() {
+  local id=$1
+  [ -n "$id" ] || return 1
+  mail_seen "$id" || printf '%s\n' "$id" >> "$CURSOR"
 }
 
 mail_retry_add() {
@@ -485,7 +523,7 @@ mail_poll() {
   # interrupted between its phases (mail_heal), so an overlapping poll or an
   # interrupted run can never lose a mail. wake_for owns the remaining
   # kill-window duplicate residual.
-  local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0
+  local list generation first_line uid fr subj status woke=0 need_wake line wake_rc=0 capped=0
   if [ ! -f "$SCRIPT_DIR/fm-wake-lib.sh" ]; then
     echo "fm-mail: $SCRIPT_DIR/fm-wake-lib.sh missing; cannot poll" >&2
     return 1
@@ -494,6 +532,7 @@ mail_poll() {
   # shellcheck disable=SC1091
   . "$SCRIPT_DIR/fm-wake-lib.sh"
   fm_lock_acquire_wait "$STATE_DIR/.mail-seen.lock"
+  rm -f "$AWAY_SCAN.next"
   if ! list="$(run_py poll_list)"; then
     # The poll engine already printed its cause on stderr; just release the
     # lock and fail instead of letting set -e abort the whole script with the
@@ -542,6 +581,17 @@ mail_poll() {
     [ -z "$status" ] && status=ok
     need_wake=0
     case "$status" in
+      ignored)
+        # Away-only filtering must not consume the UID: attended polling can
+        # surface it after the captain returns.
+        ;;
+      deferred)
+        if ! mail_retry_add "$uid" || ! mail_cursor_add "$uid"; then
+          echo "fm-mail: could not retain unverified uid $uid for retry" >&2
+          fm_lock_release "$STATE_DIR/.mail-seen.lock"
+          return 1
+        fi
+        ;;
       retry)
         # Already cursor-recorded from the degraded wake. Surface recovered
         # metadata once; if a recovery/ok publish is already journaled, retry
@@ -574,6 +624,7 @@ mail_poll() {
       # bounds the durable wake queue instead of flooding firstmate.
       if [ "$woke" -ge "$MAIL_MAX_WAKES" ]; then
         echo "fm-mail: per-poll wake cap ($MAIL_MAX_WAKES) reached; remaining mail surfaces on the next poll" >&2
+        capped=1
         break
       fi
       if [ "$status" = degraded ]; then
@@ -609,6 +660,11 @@ mail_poll() {
       fi
     fi
   done <<< "$list"
+  if [ -f "$AWAY_SCAN.next" ] && [ "$capped" -eq 0 ] && ! mv -f "$AWAY_SCAN.next" "$AWAY_SCAN"; then
+    echo "fm-mail: could not commit the away-scan cursor; mail is examined again on the next poll" >&2
+    fm_lock_release "$STATE_DIR/.mail-seen.lock"
+    return 1
+  fi
   fm_lock_release "$STATE_DIR/.mail-seen.lock"
   if [ "$woke" -eq 0 ]; then
     echo "fm-mail: no new mail"
@@ -640,6 +696,10 @@ case "${1:-}" in
     ;;
   poll)
     mail_poll
+    ;;
+  afk-email)
+    shift
+    run_afk_email "$@"
     ;;
   -h|--help)
     usage

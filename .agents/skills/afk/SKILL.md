@@ -2,7 +2,7 @@
 name: afk
 description: >-
   Enter the away posture when the captain invokes /afk, says they are going afk, `state/.afk-contract` or `state/.afk` exists, an incoming message starts with `FM_INJECT_MARK`, or any `state/.subsuper-*` marker is involved.
-  It writes the durable away-posture record with the captain's away words verbatim as the whole mandate in the same turn as /afk, before any other work and without waiting for a further go, reads the words back in plain sentences after entry, announces hold-for-return only at entry, keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment and takes every safe actionable wake with main parked, as the supervision host does on a non-Pi home that runs it; the daemon still delivers batched digests elsewhere for now), and on the first unmarked message renders the return brief from durable records before ordinary work resumes.
+  It writes the durable away-posture record with the captain's away words verbatim as the whole mandate in the same turn as /afk, before any other work and without waiting for a further go; Pi entry requires the configured owner and matching destination, reads the words back in plain sentences after entry, announces configured email reach or hold-for-return when transport is unavailable, and keeps the one supervision session running in the away posture (on Pi the supervision branch acts on the words by its own judgment with main parked; elsewhere the supervision host or daemon handles wakes); on the first unmarked message it renders the return brief from durable records before ordinary work resumes.
 user-invocable: true
 metadata:
   internal: true
@@ -16,7 +16,7 @@ It never changes the authority set.
 The posture is a file, `state/.afk-contract`, written only by `bin/fm-afk-contract.sh` in the same turn as `/afk`; nothing infers the posture from chat.
 A record carrying quiet mode (`bin/fm-afk-contract.sh mode`) is not this posture: the captain is present, so none of this skill's holds for a return apply to it (the `quiet` skill owns it).
 Typing `/afk` is itself the go: the captain may not look at the screen again, so entry never waits for a further human response, and no read-back gates it or asks for a go.
-Hold-for-return is the default and the only reach profile this release records: there is no phone channel, and the entry announcement says so aloud every time.
+Hold-for-return remains the fallback when the configured owner and destination match but mail transport settings are incomplete or invalid. Pi refuses `/afk` before recording or announcing anything when `FM_AFK_EMAIL_TO` does not exactly match `FM_AFK_OWNER_EMAIL`; the [away-email setup guide](../../../docs/afk-email.md) owns setup and limits. Other primary harnesses keep their existing away path and do not claim email delivery.
 
 ## Entering: `/afk [words]`
 
@@ -45,7 +45,8 @@ Hold-for-return is the default and the only reach profile this release records: 
    Both daemon paths require the record `enter` wrote and share `bin/fm-afk-start.sh` as the daemon entry.
    The daemon is **presence-gated**: it injects escalations only while `state/.afk` exists, and stays quiet otherwise.
 3. **Announce, then read back after entry.**
-   Relay the announcement in spirit: hold-for-return only, no phone channel, your instructions are recorded and the away session will carry them out where it can, anything it is unsure of, or that needs you, waits for your return, and destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
+   Relay the recorded reach line exactly in spirit, following [Away email](../../../docs/afk-email.md) for configured email reach or hold-for-return when transport is unavailable. On Pi, captain-facing outcomes are emailed to the configured owner address when email reach is active and otherwise wait for your return; other primary harnesses retain their existing away path. Destructive, irreversible, and security-sensitive actions are never pre-authorizable whatever the words say.
+
    Then give your own plain-sentence restatement of the words in `AGENTS.md` section 9 language - what you read them as asking for, sentence by sentence, never a numbered field list - beside the expected return, the spend cap, and the one-sentence reach announcement.
    Say plainly which sentence, if any, you could not act on while away (a red merge, a discard, anything on the never-set, local-only landing); it waits for their return.
    This read-back is informational: the record already stands, so never ask for a go or wait for a reply; a captain who wants a different reading sends `/afk` again with new words.
@@ -53,6 +54,8 @@ Hold-for-return is the default and the only reach profile this release records: 
    On Pi nothing changes about arming: the supervision session's own cycle continues.
 
 ## While away
+
+- Follow [Away email](../../../docs/afk-email.md) for the delivery, authentication, reply, and safety contract of optional email reach.
 
 - The record exists, so the watcher never rechecks an item held for the captain, in either supervision shape; the return brief lists it instead.
   Declared external waits keep their condition-aware, hours-long recheck cadence (`bin/fm-watch.sh`, `bin/fm-classify-lib.sh`).
