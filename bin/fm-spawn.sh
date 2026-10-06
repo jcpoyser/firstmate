@@ -901,7 +901,6 @@ validate_positional_shape() {
     }
   fi
 }
-validate_positional_shape || exit 1
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1650,6 +1649,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+[ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
+  echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+  exit 1
+}
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || {
   echo "error: invalid task id" >&2
@@ -1787,6 +1790,7 @@ if [ "$RELAUNCH" -eq 0 ]; then
   spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
+validate_positional_shape || exit 1
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0
