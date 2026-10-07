@@ -4,7 +4,7 @@
 # Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
-#   A missing or empty task-id is refused before launch; a missing or empty project-dir is also refused for ship or scout spawns, including batch pairs, with an actionable argument error.
+#   A missing or empty task-id is refused before launch; a missing or empty project-dir is also refused for ship or scout spawns, including batch pairs, with an actionable argument error. These checks run after the supervision-branch actor refusal (exit 6) and state-directory resolution, and before lock and spend-cap work; a batch refuses whole if any pair has a missing or empty task id or project dir. Project directories are not resolved before launch.
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
 #   per task at intake (AGENTS.md section 7); data/projects.md holds the captain's

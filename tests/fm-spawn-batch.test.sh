@@ -153,7 +153,7 @@ test_mixed_batch_preflights_every_pair_before_reexecution() {
   status=$?
   [ "$status" -ne 0 ] || fail "a mixed batch with a non-pair argument should refuse"
   printf '%s\n' "$out" | grep -F "error: batch dispatch expects every argument as id=repo; got 'bogus-no-equals'" >/dev/null \
-    || fail "mixed batch did not name the malformed pair argument"
+    || fail "mixed batch did not name the non-pair argument"
   assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-nonpair' \
     "a valid pair was re-executed before a later non-pair argument was rejected"
   pass "a missing or empty task id or project dir, or a non-pair argument, in any batch pair refuses before any pair is re-executed"
