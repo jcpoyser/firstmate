@@ -149,6 +149,14 @@ test_mixed_batch_preflights_every_pair_before_reexecution() {
   assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-empty-id' \
     "a valid pair was re-executed before a later empty task id was rejected"
 
+  out=$(run_ship_spawn valid-batch-before-invalid-id=projects/none bad/id=projects/also-none)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with an invalid task id should refuse"
+  printf '%s\n' "$out" | grep -F "error: invalid task id 'bad/id'" >/dev/null \
+    || fail "mixed batch did not name the invalid task id"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-invalid-id' \
+    "a valid pair was re-executed before a later invalid task id was rejected"
+
   out=$(run_ship_spawn valid-batch-before-nonpair=projects/none bogus-no-equals)
   status=$?
   [ "$status" -ne 0 ] || fail "a mixed batch with a non-pair argument should refuse"
