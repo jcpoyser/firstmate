@@ -579,7 +579,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
 The Codex foreground-checkpoint distinction was verified hermetically on 2026-09-14 with real watcher processes and isolated home state.
-The regression left a durable queue row unacknowledged after a first checkpoint announced its recovery generation, then proved the next checkpoint stayed active for its full bound without changing that generation (without the checkpoint distinction this case returns `check: rearm-resurface` with exit 0 instead of 124), proved a never-announced generation still surfaced once, and appended a durable wake during a live checkpoint to prove it still resurfaced.
+The regression reproduced an announced recovery episode, proved the next checkpoint stayed active for its full bound without changing that generation, proved a never-announced generation still surfaced once, and appended a durable wake during a live checkpoint to prove it still resurfaced.
 This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
 
 ```sh
@@ -593,6 +593,23 @@ ok - an announced recovery is not reannounced by the next foreground checkpoint
 ok - a never-announced recovery still surfaces once from a foreground checkpoint
 ok - a queue append during a foreground checkpoint still resurfaces
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=11750
+```
+
+On 2026-10-07 the announced-recovery fixture was revised so it reproduces the original failure.
+It appends a durable queue row, lets a first checkpoint announce that recovery generation while the row stays unacknowledged, then runs a second checkpoint and asserts it supervises for its full bound with the generation and row unchanged.
+The fixture was run on its own in an isolated copy of the test file, once with the checkpoint wrapper as committed and once with its `FM_WATCH_FOREGROUND_CHECKPOINT=1` export removed.
+The full file was not used for this record because its earlier quiet-checkpoint case failed on the verifying host before reaching the fixture.
+
+Observed output with the checkpoint distinction:
+
+```text
+ok - an announced recovery is not reannounced by the next foreground checkpoint
+```
+
+Observed output without the checkpoint distinction:
+
+```text
+not ok - announced recovery checkpoint exit: expected exit 124, got 0
 ```
 
 Deterministic entry points:
