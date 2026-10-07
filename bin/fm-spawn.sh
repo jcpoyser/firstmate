@@ -823,45 +823,13 @@ done
   exit 1
 }
 validate_positional_shape() {
-  local first idpart pair pair_id pair_proj batch=0
-  [ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
-    echo "error: spawn requires a task id positional argument (<task-id>)" >&2
-    return 1
-  }
   if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
     return 0
   fi
-  first=${POS[0]}
-  idpart=${first%%=*}
-  if [ "$first" != "$idpart" ]; then
-    case "$idpart" in
-    */*) ;;
-    *) batch=1 ;;
-    esac
-  fi
-  if [ "$batch" -eq 1 ]; then
-    for pair in "${POS[@]}"; do
-      case "$pair" in
-      *=*)
-        pair_id=${pair%%=*}
-        pair_proj=${pair#*=}
-        [ -n "$pair_id" ] || {
-          echo "error: spawn requires a task id positional argument (<task-id>)" >&2
-          return 1
-        }
-        [ -n "$pair_proj" ] || {
-          echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
-          return 1
-        }
-        ;;
-      esac
-    done
-  else
-    [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
-      echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
-      return 1
-    }
-  fi
+  [ "${#POS[@]}" -gt 1 ] && [ -n "${POS[1]:-}" ] || {
+    echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+    return 1
+  }
 }
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
