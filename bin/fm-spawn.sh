@@ -642,22 +642,12 @@ if ! KEEP_AI_TRAILERS=$(fm_config_source_present "$CONFIG/keep-ai-trailers"); th
   exit 1
 fi
 SUB_HOME_MARKER=".fm-secondmate-home"
-if [ -e "$STATE" ] || [ -L "$STATE" ]; then
-  fm_backlog_directory_present "$STATE" "state directory" || {
-    echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-    exit 1
-  }
-fi
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
-fm_backlog_directory_present "$STATE" "state directory" || {
-  echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
-}
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -687,9 +677,6 @@ fm_backlog_directory_present "$STATE" "state directory" || {
 # Fail closed before any fleet mutation: a no-mistakes gate agent must never spawn
 # a direct report (see bin/fm-gate-refuse-lib.sh).
 fm_refuse_if_gate_agent
-# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
-# set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 KIND=ship
 KIND_SET=0
 HARNESS_ARG=
@@ -861,6 +848,56 @@ done
   exit 1
 }
 validate_positional_shape() {
+  local first idpart pair pair_id pair_proj batch=0 batch_error=0 pair_error
+  [ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
+    echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+    return 1
+  }
+  first=${POS[0]}
+  idpart=${first%%=*}
+  if [ "$first" != "$idpart" ]; then
+    case "$idpart" in
+    */*) ;;
+    *) batch=1 ;;
+    esac
+  fi
+  if [ "$batch" -eq 1 ]; then
+    if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
+      return 0
+    fi
+    for pair in "${POS[@]}"; do
+      case "$pair" in
+      *=*)
+        pair_id=${pair%%=*}
+        pair_proj=${pair#*=}
+        ;;
+      *)
+        echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2
+        batch_error=2
+        continue
+        ;;
+      esac
+      pair_error=0
+      if [ -z "$pair_id" ]; then
+        echo "error: spawn requires a task id positional argument (<task-id>)" >&2
+        pair_error=1
+      elif ! fm_task_id_creation_valid "$pair_id"; then
+        echo "error: invalid task id" >&2
+        pair_error=2
+      fi
+      if [ -z "$pair_proj" ]; then
+        echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
+        pair_error=1
+      fi
+      [ "$pair_error" -eq 0 ] || batch_error=$pair_error
+    done
+    [ "$batch_error" -eq 0 ] || return "$batch_error"
+    return 0
+  fi
+  fm_task_id_creation_valid "$first" || {
+    echo "error: invalid task id" >&2
+    return 2
+  }
   if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
     return 0
   fi
@@ -869,6 +906,29 @@ validate_positional_shape() {
     return 1
   }
 }
+# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
+# an existing task is legitimate branch recovery (fm-control drives it through
+# this same entrypoint), so only a fresh spawn refuses the branch actor. While
+# an away-posture record exists main is parked and a fresh spawn of queued work
+# relocates to the branch; the queue and spend-cap gates below still apply.
+# shellcheck source=bin/fm-lease-lib.sh
+. "$SCRIPT_DIR/fm-lease-lib.sh"
+if [ "$RELAUNCH" -ne 1 ]; then
+  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
+fi
+if validate_positional_shape; then
+  :
+else
+  positional_status=$?
+  exit "$positional_status"
+fi
+fm_backlog_directory_present "$STATE" "state directory" || {
+  echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+  exit 1
+}
+# Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
+# set by the batch loop below), so the guard runs once for the batch, not once per pair.
+[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1617,15 +1677,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
-[ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
-  echo "error: spawn requires a task id positional argument (<task-id>)" >&2
-  exit 1
-}
 ID=${POS[0]}
-fm_task_id_creation_valid "$ID" || {
-  echo "error: invalid task id" >&2
-  exit 2
-}
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then
@@ -1641,21 +1693,6 @@ if [ -e "$STATE" ] || [ -L "$STATE" ]; then
 elif [ "$RELAUNCH" -eq 1 ]; then
   echo "error: spawn refused: state directory does not exist at $STATE" >&2
   exit 1
-fi
-# Role partition: spawning NEW work is MAIN-owned while attended. A relaunch of
-# an existing task is legitimate branch recovery (fm-control drives it through
-# this same entrypoint), so only a fresh spawn refuses the branch actor
-# (contract: bin/fm-lease-lib.sh; no-op in homes without a branch actor). While
-# the away-posture record exists main is parked and a fresh spawn of queued
-# work relocates to the branch, under the record's spend cap below - the same
-# cap main meets in that posture. Queued means a dispatchable backlog item:
-# one already queued at entry, or one the branch filed itself because the
-# captain's away words explicitly call for that work (its backlog note cites
-# the words); filing the item the captain asked for is not inventing work.
-# shellcheck source=bin/fm-lease-lib.sh
-. "$SCRIPT_DIR/fm-lease-lib.sh"
-if [ "$RELAUNCH" -ne 1 ]; then
-  fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
 spawn_refuse_if_away_spend_cap() {
   local cap live meta
@@ -1758,7 +1795,6 @@ if [ "$RELAUNCH" -eq 0 ]; then
   spawn_refuse_if_away_spend_cap
   spawn_require_relocated_queued_work
 fi
-validate_positional_shape || exit 1
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
     exit 0

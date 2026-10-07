@@ -68,7 +68,6 @@ test_batch_mode_boundaries() {
     esac
   done <<'ROWS'
 single id=repo pair routes through batch|yes|batch: FAILED to spawn nope-batch-solo-z3 (projects/none-solo)|nope-batch-solo-z3=projects/none-solo
-non-pair arg in batch is rejected|yes|batch dispatch expects every argument as id=repo; got 'bogus-no-equals'|nope-batch-mix-z5=projects/none-mix bogus-no-equals
 plain '<id> <repo>' is single-task|no||nope-single-z4 projects/none-single
 id part containing '/' is not a pair|no||weird/id-z6=projects/none projects/none
 ROWS
@@ -132,6 +131,34 @@ test_batch_empty_fields_refuse_with_actionable_errors() {
   pass "batch dispatch refuses empty task and project fields before re-exec"
 }
 
+test_mixed_batch_preflights_every_pair_before_reexecution() {
+  local out status
+  out=$(run_ship_spawn valid-batch-before-empty-project=projects/none empty-project-later=)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with an empty project should refuse"
+  printf '%s\n' "$out" | grep -F 'error: ship spawn requires a project directory positional argument (<project-dir>)' >/dev/null \
+    || fail "mixed batch did not name the missing project argument"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-empty-project' \
+    "a valid pair was re-executed before a later empty project was rejected"
+
+  out=$(run_ship_spawn valid-batch-before-empty-id=projects/none =projects/also-none)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with an empty task id should refuse"
+  printf '%s\n' "$out" | grep -F 'error: spawn requires a task id positional argument (<task-id>)' >/dev/null \
+    || fail "mixed batch did not name the missing task id"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-empty-id' \
+    "a valid pair was re-executed before a later empty task id was rejected"
+
+  out=$(run_ship_spawn valid-batch-before-nonpair=projects/none bogus-no-equals)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a mixed batch with a non-pair argument should refuse"
+  printf '%s\n' "$out" | grep -F "error: batch dispatch expects every argument as id=repo; got 'bogus-no-equals'" >/dev/null \
+    || fail "mixed batch did not name the malformed pair argument"
+  assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-nonpair' \
+    "a valid pair was re-executed before a later non-pair argument was rejected"
+  pass "mixed batch arguments are preflighted before any pair is re-executed"
+}
+
 test_batch_requires_the_shared_delivery_contract() {
   local out status
   out=$(run_spawn nope-batch-nomode-z9=projects/none-a nope-batch-nomode-z10=projects/none-b)
@@ -165,6 +192,7 @@ test_scout_batch_refuses_delivery_flags() {
 test_batch_dispatches_every_pair
 test_batch_mode_boundaries
 test_batch_empty_fields_refuse_with_actionable_errors
+test_mixed_batch_preflights_every_pair_before_reexecution
 test_batch_requires_the_shared_delivery_contract
 test_scout_batch_refuses_delivery_flags
 test_projects_path_scoping
