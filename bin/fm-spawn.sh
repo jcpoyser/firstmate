@@ -848,55 +848,9 @@ done
   exit 1
 }
 validate_positional_shape() {
-  local first idpart pair pair_id pair_proj batch=0 batch_error=0 pair_error
   [ "${#POS[@]}" -gt 0 ] && [ -n "${POS[0]:-}" ] || {
     echo "error: spawn requires a task id positional argument (<task-id>)" >&2
     return 1
-  }
-  first=${POS[0]}
-  idpart=${first%%=*}
-  if [ "$first" != "$idpart" ]; then
-    case "$idpart" in
-    */*) ;;
-    *) batch=1 ;;
-    esac
-  fi
-  if [ "$batch" -eq 1 ]; then
-    if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
-      return 0
-    fi
-    for pair in "${POS[@]}"; do
-      case "$pair" in
-      *=*)
-        pair_id=${pair%%=*}
-        pair_proj=${pair#*=}
-        ;;
-      *)
-        echo "error: batch dispatch expects every argument as id=repo; got '$pair'" >&2
-        batch_error=2
-        continue
-        ;;
-      esac
-      pair_error=0
-      if [ -z "$pair_id" ]; then
-        echo "error: spawn requires a task id positional argument (<task-id>)" >&2
-        pair_error=1
-      elif ! fm_task_id_creation_valid "$pair_id"; then
-        echo "error: invalid task id" >&2
-        pair_error=2
-      fi
-      if [ -z "$pair_proj" ]; then
-        echo "error: ${KIND} spawn requires a project directory positional argument (<project-dir>)" >&2
-        pair_error=1
-      fi
-      [ "$pair_error" -eq 0 ] || batch_error=$pair_error
-    done
-    [ "$batch_error" -eq 0 ] || return "$batch_error"
-    return 0
-  fi
-  fm_task_id_creation_valid "$first" || {
-    echo "error: invalid task id" >&2
-    return 2
   }
   if [ "$RELAUNCH" -eq 1 ] || [ "$KIND" = secondmate ]; then
     return 0
@@ -916,19 +870,15 @@ validate_positional_shape() {
 if [ "$RELAUNCH" -ne 1 ]; then
   fm_lease_forbid_branch "new-task spawn (fm-spawn)" --away-relocated
 fi
-if validate_positional_shape; then
-  :
-else
-  positional_status=$?
-  exit "$positional_status"
-fi
-fm_backlog_directory_present "$STATE" "state directory" || {
-  echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
-  exit 1
-}
 # Skip the watcher guard when re-exec'd for one pair of a batch (FM_SPAWN_NO_GUARD is
 # set by the batch loop below), so the guard runs once for the batch, not once per pair.
-[ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+spawn_enter_state_directory() {
+  fm_backlog_directory_present "$STATE" "state directory" || {
+    echo "error: spawn refused: $FM_BACKLOG_TRANSITION_ERROR" >&2
+    exit 1
+  }
+  [ -n "${FM_SPAWN_NO_GUARD:-}" ] || "$FM_ROOT/bin/fm-guard.sh" || true
+}
 # A parent-delivered carrier replaces this home's own resolution, so it is
 # refused unless it is a secondmate spawn carrying a strictly valid W3C value.
 # Nothing else may reach the pane's TRACEPARENT export.
@@ -1599,7 +1549,10 @@ spawn_herdr_presentation_order_lock_release() {
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
 # the FM_ROOT path (not $0) so it works whatever cwd or relative path invoked us, and reuse
-# the single path verbatim. A failed pair is reported and skipped; the rest still launch;
+# the single path verbatim. Every pair is first checked for id=repo shape, a valid task id,
+# and a missing or empty task id or project dir; any such error refuses the whole batch
+# before any pair runs. Project directories are resolved only by each pair's own spawn.
+# A failed pair is reported and skipped; the rest still launch;
 # exit is non-zero if any pair failed. Single-task invocations never carry an '=' in arg
 # one (task ids are bare slugs), so they fall straight through to the logic below.
 idpart=${POS[0]:-}
@@ -1659,6 +1612,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
     }
   done
   [ "$preflight_rc" -eq 0 ] || exit "$preflight_rc"
+  spawn_enter_state_directory
 
   for pair in "${POS[@]}"; do
     pair_id=${pair%%=*}
@@ -1677,7 +1631,18 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   done
   exit "$rc"
 fi
+if validate_positional_shape; then
+  :
+else
+  positional_status=$?
+  exit "$positional_status"
+fi
+spawn_enter_state_directory
 ID=${POS[0]}
+fm_task_id_creation_valid "$ID" || {
+  echo "error: invalid task id" >&2
+  exit 2
+}
 if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" = ship ]; then
   BRANCH="$BRANCH_PREFIX$ID"
   if ! git check-ref-format --branch "$BRANCH" >/dev/null 2>&1; then

@@ -128,7 +128,7 @@ test_batch_empty_fields_refuse_with_actionable_errors() {
   printf '%s\n' "$out" | grep -F 'error: spawn requires a task id positional argument (<task-id>)' >/dev/null \
     || fail "an empty batch task did not name the required task id argument"
   assert_not_contains "$out" "unbound variable" "an empty batch task must not expose a shell error"
-  pass "batch dispatch refuses empty task and project fields before re-exec"
+  pass "batch dispatch refuses a missing or empty task id or project dir before re-exec"
 }
 
 test_mixed_batch_preflights_every_pair_before_reexecution() {
@@ -156,7 +156,7 @@ test_mixed_batch_preflights_every_pair_before_reexecution() {
     || fail "mixed batch did not name the malformed pair argument"
   assert_not_contains "$out" 'batch: FAILED to spawn valid-batch-before-nonpair' \
     "a valid pair was re-executed before a later non-pair argument was rejected"
-  pass "mixed batch arguments are preflighted before any pair is re-executed"
+  pass "a missing or empty task id or project dir, or a non-pair argument, in any batch pair refuses before any pair is re-executed"
 }
 
 test_batch_requires_the_shared_delivery_contract() {
