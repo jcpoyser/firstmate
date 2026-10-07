@@ -578,8 +578,9 @@ ok - unacknowledged recovery is announced at most once per generation and the su
 FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
-The Codex foreground-checkpoint distinction was verified hermetically on 2026-09-14 with real watcher processes and isolated home state.
-The regression reproduced an announced recovery episode, proved the next checkpoint stayed active for its full bound without changing that generation, proved a never-announced generation still surfaced once, and appended a durable wake during a live checkpoint to prove it still resurfaced.
+The Codex foreground-checkpoint behavior was exercised hermetically on 2026-09-14 with real watcher processes and isolated home state.
+That run observed an announced recovery remain announced through a quiet checkpoint, a never-announced generation surface once, and a durable wake appended during a live checkpoint resurface.
+Its announced-recovery fixture had no unacknowledged durable queue row, so it did not establish that the old behavior reproduced the regression; the revised counterfactual fixture and result are recorded separately below.
 This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
 
 ```sh
