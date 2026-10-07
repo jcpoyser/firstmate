@@ -46,8 +46,22 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
   home=$(make_home announced-recovery)
   out="$home/out.txt"
   err="$home/err.txt"
-  marker='announced:downtime:reported.1.aaa'
-  printf '%s\n' "$marker" > "$home/state/.watcher-down"
+  append_wake "$home/state" check buried 'check: unacknowledged durable wake' \
+    || fail "could not append the unacknowledged durable wake"
+
+  status=0
+  FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
+    "$CHECKPOINT" --seconds 5 >"$out" 2>"$err" || status=$?
+  expect_code 0 "$status" "first recovery checkpoint exit"
+  assert_contains "$(cat "$out")" "check: rearm-resurface" \
+    "first checkpoint did not announce the pending recovery"
+  marker=$(cat "$home/state/.watcher-down")
+  case "$marker" in
+    announced:downtime:*) ;;
+    *) fail "first checkpoint did not leave an announced generation: $marker" ;;
+  esac
+  [ -s "$home/state/.wake-queue" ] \
+    || fail "durable wake did not stay unacknowledged after the announcement"
 
   status=0
   FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 \
@@ -60,6 +74,9 @@ test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
     "announced recovery was reannounced by the next checkpoint"
   [ "$(cat "$home/state/.watcher-down")" = "$marker" ] \
     || fail "announced recovery checkpoint changed the outstanding generation"
+  grep "$(printf '\tcheck\tburied\tcheck: unacknowledged durable wake')" \
+    "$home/state/.wake-queue" >/dev/null \
+    || fail "unacknowledged durable wake was not retained"
   pass "an announced recovery is not reannounced by the next foreground checkpoint"
 }
 

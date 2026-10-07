@@ -579,7 +579,7 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=59357
 ```
 
 The Codex foreground-checkpoint distinction was verified hermetically on 2026-09-14 with real watcher processes and isolated home state.
-The regression reproduced an announced recovery episode, proved the next checkpoint stayed active for its full bound without changing that generation, proved a never-announced generation still surfaced once, and appended a durable wake during a live checkpoint to prove it still resurfaced.
+The regression left a durable queue row unacknowledged after a first checkpoint announced its recovery generation, then proved the next checkpoint stayed active for its full bound without changing that generation (without the checkpoint distinction this case returns `check: rearm-resurface` with exit 0 instead of 124), proved a never-announced generation still surfaced once, and appended a durable wake during a live checkpoint to prove it still resurfaced.
 This state transition depends on Firstmate's checkpoint wrapper rather than vendor output, so no live Codex prompt was required.
 
 ```sh
