@@ -1,0 +1,15 @@
+Live validation of bin/fm-watch-checkpoint.sh against isolated disposable FM_HOME state (2026-10-07)
+
+Announced recovery with durable unacknowledged row:
+first checkpoint: exit 0, output `check: rearm-resurface`
+second checkpoint: exit 124, output `checkpoint: no actionable wake within 1s`
+marker unchanged: `announced:downtime:77579.1791389922.N3pYaC`
+queue row retained: `check\tburied\tcheck: unacknowledged durable wake`
+
+Never-announced generation:
+exit 0; `check: rearm-resurface` emitted once; marker became `announced:downtime:unreported.1.aaa`
+
+Durable append during a running checkpoint:
+exit 0; output `check: rearm-resurface`; appended queue row retained: `check\tconcurrent\tcheck: appended during checkpoint`
+
+The disposable home was removed after validation.
