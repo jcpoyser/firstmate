@@ -75,9 +75,10 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
 }
 trap 'rm -f "$OUT" "$ERR"' EXIT
 
-run_with_perl_timeout() {  # <seconds> <command...>
+run_with_perl_timeout() {  # <seconds> <signal> <command...>
   perl -e '
     my $seconds = shift;
+    my $signal = shift;
     my $pid = fork;
     die "fork failed\n" unless defined $pid;
     if (!$pid) {
@@ -86,7 +87,7 @@ run_with_perl_timeout() {  # <seconds> <command...>
       die "exec failed: $!\n";
     }
     local $SIG{ALRM} = sub {
-      kill "TERM", -$pid;
+      kill $signal, -$pid;
       my $grace = $ENV{FM_SIGNAL_GRACE} || 5;
       local $SIG{ALRM} = sub {
         kill "KILL", -$pid;
@@ -104,13 +105,15 @@ run_with_perl_timeout() {  # <seconds> <command...>
   ' "$@"
 }
 
-run_bounded() {  # <seconds> <command...>
+run_bounded() {  # <seconds> <signal> <command...>
+  local seconds=$1 signal=$2
+  shift 2
   if command -v timeout >/dev/null 2>&1; then
-    timeout "$@"
+    timeout --signal="$signal" --kill-after=5s "$seconds" "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$@"
+    gtimeout --signal="$signal" --kill-after=5s "$seconds" "$@"
   else
-    run_with_perl_timeout "$@"
+    run_with_perl_timeout "$seconds" "$signal" "$@"
   fi
 }
 
@@ -134,7 +137,7 @@ if fm_supervision_host_enabled "$CONFIG" codex; then
   # The host ends its own park; the outer bound only catches a host that
   # outlived every one of its own bounds.
   FM_SUPERVISION_HOST_PRIMARY=codex FM_SUPERVISION_HOST_PARK_SECONDS=$BOUND FM_SUPERVISION_HOST_PARK_LIMIT=$LIMIT \
-    run_bounded $((LIMIT + 120)) "$SCRIPT_DIR/fm-supervision-host.sh" park >"$OUT" 2>"$ERR"
+    run_bounded $((LIMIT + 120)) TERM "$SCRIPT_DIR/fm-supervision-host.sh" park >"$OUT" 2>"$ERR"
   RC=$?
   set -e
   if grep -E '^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)' "$OUT" 2>/dev/null \
@@ -158,7 +161,8 @@ if fm_supervision_host_enabled "$CONFIG" codex; then
 fi
 
 set +e
-run_bounded "$SECONDS_ARG" "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+# Interrupt the checkpoint's active check group so the watcher's native EXIT cleanup can release its lock; ordinary watcher shutdown still uses TERM.
+run_bounded "$SECONDS_ARG" INT "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 
