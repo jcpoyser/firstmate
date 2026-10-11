@@ -1095,7 +1095,7 @@ test_stop_ends_the_home_watcher_and_publishes_downtime() {
   state="$home/state"
   fakebin=$(make_case stop-home-watcher-bin)/fakebin
   mkdir -p "$state"
-  FM_HOME="$home" start_seed_watcher "$state" "$fakebin" "$dir/watch.out"
+  FM_HOME="$home" start_seed_watcher "$state" "$fakebin" "$dir/watch.out" 1
   out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$state" "$WATCH_ARM" --stop 2>&1); status=$?
   expect_code 0 "$status" "--stop of a live home watcher must succeed"
   assert_contains "$out" "watcher: stopped pid=$SEED_PID" "--stop must name the watcher it stopped"
