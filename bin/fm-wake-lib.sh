@@ -1265,7 +1265,6 @@ fm_lock_try_acquire() {
 fm_lock_acquire_wait() {
   local lockdir=$1
   while ! fm_lock_try_acquire "$lockdir"; do
-    [ -z "${FM_WATCH_STOP_STATUS:-}" ] || return 1
     sleep 0.1
   done
 }
@@ -1278,7 +1277,6 @@ fm_lock_acquire_wait_max() {  # <lockdir> <max-seconds>
   local lockdir=$1 seconds=$2 deadline
   deadline=$((SECONDS + seconds))
   while ! fm_lock_try_acquire "$lockdir"; do
-    [ -z "${FM_WATCH_STOP_STATUS:-}" ] || return 1
     [ "$SECONDS" -lt "$deadline" ] || return 1
     sleep 0.1
   done
