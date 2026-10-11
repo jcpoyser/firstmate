@@ -1,0 +1,52 @@
+Live validation against /Users/jpoyser/.no-mistakes/worktrees/df320aaf7596/01M4P0H3Q20WBZWCDDC08AYN03/bin/fm-watch-checkpoint.sh
+Worktree commit: 351dec13
+
+$ FM_HOME=<isolated> bin/fm-watch-checkpoint.sh --seconds 5
+exit: 0
+stdout:
+check: rearm-resurface
+stderr:
+
+after first checkpoint: marker=announced:downtime:61360.1791749101.etymlM
+queue=1791749101	1	check	buried	check: unacknowledged durable wake
+
+$ FM_HOME=<isolated> bin/fm-watch-checkpoint.sh --seconds 1
+exit: 124
+stdout:
+checkpoint: no actionable wake within 1s
+stderr:
+
+after next checkpoint: marker=announced:downtime:61360.1791749101.etymlM
+queue=1791749101	1	check	buried	check: unacknowledged durable wake
+
+$ FM_HOME=<isolated> bin/fm-watch-checkpoint.sh --seconds 5
+exit: 0
+stdout:
+check: rearm-resurface
+stderr:
+
+after checkpoint: marker=announced:downtime:unreported.1.live; announcement_count=1
+
+$ FM_HOME=<isolated> bin/fm-watch-checkpoint.sh --seconds 5
+exit: 124
+stdout:
+checkpoint: no actionable wake within 5s
+stderr:
+
+
+$ (active) FM_HOME=<isolated> bin/fm-watch-checkpoint.sh --seconds 5; append durable wake after lock acquisition
+exit: 0
+stdout:
+check: rearm-resurface
+stderr:
+
+queue:1791749109	1	check	concurrent	check: appended during checkpoint
+
+$ FM_HOME=<isolated> bin/fm-watch-checkpoint.sh --seconds 1
+exit: 124
+stdout:
+checkpoint: no actionable wake within 1s
+stderr:
+
+post-timeout lock pid: absent
+All manually driven product scenarios completed.
