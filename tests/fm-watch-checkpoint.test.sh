@@ -41,7 +41,7 @@ test_quiet_checkpoint_exits_124_cleanly() {
   pass "quiet checkpoint exits 124 with a clean checkpoint line and no live lock"
 }
 
-test_perl_timeout_fallback_escalates_direct_watcher() {
+test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
   local home fallback_bin tool tool_path status watcher_pid
   home=$(make_home perl-fallback)
   fallback_bin="$home/fallback-bin"
@@ -60,29 +60,34 @@ $SIG{INT} = 'IGNORE';
 open my $pid_file, '>', "$ENV{FM_HOME}/watcher.pid" or die "open pid file: $!";
 printf {$pid_file} "%s\n", $$;
 close $pid_file;
+sleep 7;
+open my $cleanup_file, '>', "$ENV{FM_HOME}/cleanup-reached" or die "open cleanup marker: $!";
+print {$cleanup_file} "reached\n";
+close $cleanup_file;
 END {
   if (open my $exit_file, '>', "$ENV{FM_HOME}/natural-exit") {
     print {$exit_file} "natural\n";
   }
 }
-sleep 4;
+sleep 20;
 PL
   chmod +x "$home/root/bin/fm-watch-checkpoint.sh" "$home/root/bin/fm-watch.sh"
 
   status=0
-  PATH="$fallback_bin" FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 \
+  PATH="$fallback_bin" FM_HOME="$home" FM_POLL=1 FM_SIGNAL_GRACE=1 FM_WATCHER_CLEANUP_LOCK_BOUND=8 \
     "$home/root/bin/fm-watch-checkpoint.sh" --seconds 1 >"$home/out.txt" 2>"$home/err.txt" || status=$?
 
   expect_code 124 "$status" "Perl fallback checkpoint exit"
   assert_contains "$(cat "$home/out.txt")" "checkpoint: no actionable wake within 1s" \
     "Perl fallback did not return a quiet checkpoint"
+  [ -e "$home/cleanup-reached" ] || fail "the Perl fallback killed the watcher before its 8-second cleanup bound"
   [ ! -e "$home/natural-exit" ] || fail "the INT-ignoring watcher exited naturally instead of being killed"
   [ -s "$home/watcher.pid" ] || fail "the INT-ignoring watcher did not start"
   watcher_pid=$(cat "$home/watcher.pid")
   if kill -0 "$watcher_pid" 2>/dev/null; then
     fail "the INT-ignoring watcher survived the Perl fallback escalation"
   fi
-  pass "Perl fallback escalates an INT-ignoring direct watcher"
+  pass "Perl fallback honors the cleanup bound before escalating an INT-ignoring direct watcher"
 }
 
 test_announced_recovery_is_not_reannounced_by_next_checkpoint() {
@@ -340,7 +345,7 @@ test_real_host_checkpoint_ends_quietly_at_its_bound() {
 }
 
 test_quiet_checkpoint_exits_124_cleanly
-test_perl_timeout_fallback_escalates_direct_watcher
+test_perl_timeout_fallback_honors_cleanup_bound_before_escalating
 test_announced_recovery_is_not_reannounced_by_next_checkpoint
 test_never_announced_recovery_is_announced_once
 test_queue_append_during_checkpoint_still_resurfaces

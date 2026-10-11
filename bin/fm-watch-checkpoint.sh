@@ -75,7 +75,7 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
 }
 trap 'rm -f "$OUT" "$ERR"' EXIT
 
-run_with_perl_timeout() {  # <seconds> <signal> <kill-after> <command...>
+run_with_perl_timeout() {  # <seconds> <signal> <kill-after-seconds> <command...>
   perl -e '
     use POSIX qw(:sys_wait_h);
     my $seconds = shift;
@@ -97,7 +97,7 @@ run_with_perl_timeout() {  # <seconds> <signal> <kill-after> <command...>
       }
       $timed_out = 1;
       kill $signal, -$pid;
-      alarm($ENV{FM_SIGNAL_GRACE} || 5) if $kill_after;
+      alarm($kill_after) if $kill_after;
     };
     alarm $seconds;
     while (1) {
@@ -111,18 +111,28 @@ run_with_perl_timeout() {  # <seconds> <signal> <kill-after> <command...>
   ' "$@"
 }
 
-run_bounded() {  # <seconds> <signal> <kill-after> <command...>
-  local seconds=$1 signal=$2 kill_after=$3
+run_bounded() {  # <seconds> <signal> <kill-after-seconds> <command...>
+  local seconds=$1 signal=$2 kill_after=$3 cleanup_lock_bound
   shift 3
+  if [ "$kill_after" -gt 0 ]; then
+    cleanup_lock_bound=${FM_WATCHER_CLEANUP_LOCK_BOUND:-2}
+    case "$cleanup_lock_bound" in
+      ''|*[!0-9]*) cleanup_lock_bound=2 ;;
+      *) cleanup_lock_bound=$((10#$cleanup_lock_bound)) ;;
+    esac
+    [ "$cleanup_lock_bound" -gt 0 ] || cleanup_lock_bound=2
+    [ "$cleanup_lock_bound" -gt "$kill_after" ] || cleanup_lock_bound=$kill_after
+    kill_after=$cleanup_lock_bound
+  fi
   if command -v timeout >/dev/null 2>&1; then
-    if [ "$kill_after" = 1 ]; then
-      timeout --signal="$signal" --kill-after=5s "$seconds" "$@"
+    if [ "$kill_after" -gt 0 ]; then
+      timeout --signal="$signal" --kill-after="${kill_after}s" "$seconds" "$@"
     else
       timeout --signal="$signal" "$seconds" "$@"
     fi
   elif command -v gtimeout >/dev/null 2>&1; then
-    if [ "$kill_after" = 1 ]; then
-      gtimeout --signal="$signal" --kill-after=5s "$seconds" "$@"
+    if [ "$kill_after" -gt 0 ]; then
+      gtimeout --signal="$signal" --kill-after="${kill_after}s" "$seconds" "$@"
     else
       gtimeout --signal="$signal" "$seconds" "$@"
     fi
@@ -176,7 +186,7 @@ fi
 
 set +e
 # Interrupt the checkpoint's active check group so the watcher's native EXIT cleanup can release its lock; ordinary watcher shutdown still uses TERM.
-run_bounded "$SECONDS_ARG" INT 1 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+run_bounded "$SECONDS_ARG" INT 5 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 
