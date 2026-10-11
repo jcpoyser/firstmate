@@ -661,11 +661,11 @@ RESOLVE_CLOSE_MAX=$FM_LINE_CAP_DEFAULT
 FM_SEND_AUTHORITATIVE_HOLD_ID=
 FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
 fm_send_authoritative_hold() {
-  local resolved rc
+  local resolved rc prefer_origin=${3:-$CAPTAIN_DECIDES_FINDINGS}
   FM_SEND_AUTHORITATIVE_HOLD_ID=
   FM_SEND_AUTHORITATIVE_HOLD_OPEN=0
   resolved=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
-    FM_PREFER_ORIGIN_HOLD="$CAPTAIN_DECIDES_FINDINGS" \
+    FM_PREFER_ORIGIN_HOLD="$prefer_origin" \
     "$SCRIPT_DIR/fm-captain-hold.sh" resolve-entry "$1" "$2" 2>/dev/null) || return $?
   if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE='' \
     "$SCRIPT_DIR/fm-captain-hold.sh" open "$resolved" --distinguish-absent >/dev/null 2>&1; then
@@ -699,15 +699,21 @@ fm_send_add_open_held_key() {
   esac
 }
 
-fm_send_gate_held_key() { # <decision-key>
-  local key=$1 held_rc=0 answer_rc=0 child_home child_id
+fm_send_gate_held_key() { # <decision-key> [exact-first]
+  local key=$1 held_rc=0 answer_rc=0 child_home child_id prefer_origin=$CAPTAIN_DECIDES_FINDINGS
+  [ "${2:-}" = exact-first ] && prefer_origin=0
   if [ "$(fm_meta_get "$TARGET_META" kind)" = secondmate ]; then
     case "$key" in
       captain-hold-?*-[0-9]*)
         child_id=${key#captain-hold-}
         child_id=${child_id%-*}
         child_home=$(fm_meta_get "$TARGET_META" home)
-        if [ -n "$child_home" ] && [ -d "$child_home" ] &&
+        if [ -n "$(fm_meta_get "$TARGET_META" remote_host)" ]; then
+          if "$SCRIPT_DIR/fm-on.sh" "$TARGET_REMOTE_ID" fm-captain-hold.sh \
+            answer-recorded "$child_id" >/dev/null 2>&1; then
+            return 0
+          fi
+        elif [ -n "$child_home" ] && [ -d "$child_home" ] &&
           FM_HOME="$child_home" FM_STATE_OVERRIDE="$child_home/state" FM_DATA_OVERRIDE='' \
             "$SCRIPT_DIR/fm-captain-hold.sh" answer-recorded "$child_id" >/dev/null 2>&1; then
           return 0
@@ -717,7 +723,7 @@ fm_send_gate_held_key() { # <decision-key>
         ;;
     esac
   fi
-  fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$key" || held_rc=$?
+  fm_send_authoritative_hold "$CAPTAIN_POLICY_TASK_ID" "$key" "$prefer_origin" || held_rc=$?
   case "$held_rc" in
     0)
       fm_send_captain_answer_recorded "$FM_SEND_AUTHORITATIVE_HOLD_ID" || answer_rc=$?
@@ -742,7 +748,7 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_INVENTORY" ]; th
         exit 1
         ;;
     esac
-    fm_send_gate_held_key "$inventory_key"
+    fm_send_gate_held_key "$inventory_key" exact-first
   done
 fi
 if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ] && [ -n "$CAPTAIN_POLICY_TASK_ID" ] && [ -e "$CAPTAIN_POLICY_STATUS_FILE" ]; then
@@ -960,11 +966,9 @@ if [ "$CAPTAIN_DECIDES_FINDINGS" = 1 ]; then
       echo "error: --no-decision requires an open decision; nothing was sent" >&2
       exit 1
     }
-    for k in $RESOLVE_STATUS_KEYS; do
-      [ "$(_fm_open_set_verb "$CAPTAIN_POLICY_OPEN_SET" "$k")" != needs-decision ] || {
-        echo "error: --no-decision cannot accompany --resolve-key '$k' for an open needs-decision; nothing was sent" >&2
-        exit 1
-      }
+    for k in $RESOLVE_DECISION_KEYS; do
+      echo "error: --no-decision cannot accompany --resolve-key '$k' for a decision-owned key; nothing was sent" >&2
+      exit 1
     done
   elif [ -n "$CAPTAIN_OPEN_DECISION_KEYS" ]; then
     [ -n "$RESOLVE_DECISION_KEYS" ] || {

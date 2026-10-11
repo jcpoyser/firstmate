@@ -506,6 +506,32 @@ test_no_decision_declaration_precedes_later_close_failure() {
   pass "fm-send records the no-decision declaration before a later close failure"
 }
 
+test_no_decision_cannot_resolve_historically_decision_blocked_key() {
+  local dir fb log err home rc
+  dir="$TMP_ROOT/no-decision-blocked-decision"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home no-decision-blocked-decision)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/tgblocked.meta" "window=sess:fm-tgblocked" "kind=ship"
+  printf '%s\n' 'needs-decision [key=review]: review decision' \
+    'blocked [key=review]: waiting on review' \
+    'needs-decision [key=other]: choose another option' > "$home/state/tgblocked.status"
+  setup_captain_answer "$home" review 'Approve the reviewed change.'
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    FM_TASKS_AXI_COMPATIBLE=1 "$SEND" tgblocked --no-decision --resolve-key review \
+    --captain-answer review 'Approve the reviewed change.' >/dev/null 2>"$err"; rc=$?
+  [ "$rc" -ne 0 ] || fail "--no-decision misclassified a blocked key that was historically a decision"
+  assert_contains "$(cat "$err")" "--no-decision cannot accompany --resolve-key 'review' for a decision-owned key" \
+    "the conflict should identify the historically decision-owned key"
+  [ ! -e "$home/state/tgblocked.inbox/001.msg" ] || fail "the misclassified decision answer reached the worker"
+  if grep -qF 'decision-declaration: no-decision' "$home/state/tgblocked.status"; then
+    fail "the rejected decision answer was logged as a no-decision declaration"
+  fi
+  pass "fm-send rejects no-decision for historically decision-owned blocked keys"
+}
+
 test_no_decision_cannot_resolve_a_needs_decision() {
   local dir fb log err home rc
   if ! command -v tasks-axi >/dev/null 2>&1; then
@@ -1028,6 +1054,30 @@ test_partial_inventory_transfer_still_gates_omitted_key() {
   [ ! -e "$home/state/tpart.inbox/001.msg" ] \
     || fail "a steer reached the worker despite the omitted unanswered decision"
   pass "fm-send gates a decision a partial captain-hold transfer left out of the inventory"
+}
+
+test_answered_exact_inventory_hold_wins_over_active_legacy_hold() {
+  local dir fb home log err rc
+  if ! command -v tasks-axi >/dev/null 2>&1; then
+    printf 'ok - skipped (tasks-axi is required for durable captain-hold identity checks)\n'
+    return 0
+  fi
+  dir="$TMP_ROOT/exact-answer-over-legacy"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home exact-answer-over-legacy)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  fm_write_meta "$home/state/texact.meta" "window=sess:fm-texact" "kind=ship" \
+    "decision_keys=review"
+  setup_captain_answer "$home" review 'The exact inventory decision is answered.'
+  setup_captain_hold "$home" texact-decision-review
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_TASKS_AXI_COMPATIBLE=1 "$SEND" texact 'routine progress' \
+    >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "an answered exact inventory hold should not be displaced by an older legacy hold: $(cat "$err")"
+  [ -e "$home/state/texact.inbox/001.msg" ] || fail "the routine steer did not reach the worker"
+  pass "fm-send trusts the answered exact inventory task over a coexisting active legacy hold"
 }
 
 test_captain_answer_uses_authoritative_hold_identity() {
@@ -1616,6 +1666,27 @@ EOF
   printf '%s\n' "$home"
 }
 
+test_remote_secondmate_recorded_answer_unblocks_historical_key() {
+  local dir fb log home ssh_log err rc
+  dir="$TMP_ROOT/remote-recorded-answer"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; ssh_log="$dir/ssh.log"; err="$dir/send.err"
+  home=$(setup_remote_home remote-recorded-answer)
+  mkdir -p "$home/config"
+  : > "$home/config/captain-decides-findings"
+  printf '%s\n' \
+    'needs-decision [key=captain-hold-mate-call-1]: captain hold mate-call: choose a route' \
+    'resolved [key=captain-hold-mate-call-1]: captain hold mate-call: route chosen' \
+    > "$home/state/rsm.status"
+
+  env PATH="$fb:$PATH" FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" FM_SEND_LOG="$log" \
+    FM_SEND_SETTLE=0 FM_SSH_BIN="$fb/fake-ssh" FM_SSH_LOG="$ssh_log" FM_FAKE_SSH_RC=0 \
+    "$SEND" rsm 'routine progress' >/dev/null 2>"$err"; rc=$?
+  expect_code 0 "$rc" "the remote home’s recorded answer should settle its parent-channel key: $(cat "$err")"
+  [ "$(wc -l < "$ssh_log" | tr -d ' ')" -eq 2 ] \
+    || fail "expected answer verification and delivery to use the remote route: $(cat "$ssh_log")"
+  pass "fm-send checks remote secondmate answer records through fm-on before allowing ordinary steers"
+}
+
 test_remote_secondmate_answer_closes_locally() {
   local dir fb log home ssh_log rc out
   dir="$TMP_ROOT/remote-ok"; mkdir -p "$dir"
@@ -2022,6 +2093,7 @@ test_typed_no_decision_declaration_append_failure_prevents_delivery
 test_inbox_no_decision_declaration_precedes_later_close_failure
 test_no_decision_declaration_append_failure_prevents_delivery
 test_no_decision_declaration_precedes_later_close_failure
+test_no_decision_cannot_resolve_historically_decision_blocked_key
 test_no_decision_cannot_resolve_a_needs_decision
 test_multiple_needs_decisions_require_distinct_recorded_answers
 test_transferred_held_decision_requires_its_recorded_answer
@@ -2036,6 +2108,7 @@ test_double_relay_is_refused
 test_answered_secondmate_decision_does_not_block
 test_terminal_status_does_not_settle_decisions
 test_partial_inventory_transfer_still_gates_omitted_key
+test_answered_exact_inventory_hold_wins_over_active_legacy_hold
 test_captain_answer_uses_authoritative_hold_identity
 test_migrated_beads_hold_is_gated_and_uses_canonical_id
 test_legacy_declined_answer_can_be_relayed
@@ -2051,6 +2124,7 @@ test_failed_enqueue_does_not_close
 test_multiple_keys_close_together
 test_multiple_keys_close_after_fold_is_self_announced
 test_local_secondmate_answer_marked_and_closed
+test_remote_secondmate_recorded_answer_unblocks_historical_key
 test_remote_secondmate_answer_closes_locally
 test_remote_reply_corr_tag_does_not_block_resolve_key
 test_remote_transport_failure_does_not_close
