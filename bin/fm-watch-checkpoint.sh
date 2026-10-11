@@ -75,10 +75,11 @@ ERR=$(mktemp "${TMPDIR:-/tmp}/fm-watch-checkpoint.err.XXXXXX") || {
 }
 trap 'rm -f "$OUT" "$ERR"' EXIT
 
-run_with_perl_timeout() {  # <seconds> <signal> <command...>
+run_with_perl_timeout() {  # <seconds> <signal> <kill-after> <command...>
   perl -e '
     my $seconds = shift;
     my $signal = shift;
+    my $kill_after = shift;
     my $pid = fork;
     die "fork failed\n" unless defined $pid;
     if (!$pid) {
@@ -88,13 +89,15 @@ run_with_perl_timeout() {  # <seconds> <signal> <command...>
     }
     local $SIG{ALRM} = sub {
       kill $signal, -$pid;
-      my $grace = $ENV{FM_SIGNAL_GRACE} || 5;
-      local $SIG{ALRM} = sub {
-        kill "KILL", -$pid;
-        waitpid $pid, 0;
-        exit 124;
-      };
-      alarm $grace;
+      if ($kill_after) {
+        my $grace = $ENV{FM_SIGNAL_GRACE} || 5;
+        local $SIG{ALRM} = sub {
+          kill "KILL", -$pid;
+          waitpid $pid, 0;
+          exit 124;
+        };
+        alarm $grace;
+      }
       waitpid $pid, 0;
       exit 124;
     };
@@ -105,15 +108,23 @@ run_with_perl_timeout() {  # <seconds> <signal> <command...>
   ' "$@"
 }
 
-run_bounded() {  # <seconds> <signal> <command...>
-  local seconds=$1 signal=$2
-  shift 2
+run_bounded() {  # <seconds> <signal> <kill-after> <command...>
+  local seconds=$1 signal=$2 kill_after=$3
+  shift 3
   if command -v timeout >/dev/null 2>&1; then
-    timeout --signal="$signal" --kill-after=5s "$seconds" "$@"
+    if [ "$kill_after" = 1 ]; then
+      timeout --signal="$signal" --kill-after=5s "$seconds" "$@"
+    else
+      timeout --signal="$signal" "$seconds" "$@"
+    fi
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout --signal="$signal" --kill-after=5s "$seconds" "$@"
+    if [ "$kill_after" = 1 ]; then
+      gtimeout --signal="$signal" --kill-after=5s "$seconds" "$@"
+    else
+      gtimeout --signal="$signal" "$seconds" "$@"
+    fi
   else
-    run_with_perl_timeout "$seconds" "$signal" "$@"
+    run_with_perl_timeout "$seconds" "$signal" "$kill_after" "$@"
   fi
 }
 
@@ -137,7 +148,7 @@ if fm_supervision_host_enabled "$CONFIG" codex; then
   # The host ends its own park; the outer bound only catches a host that
   # outlived every one of its own bounds.
   FM_SUPERVISION_HOST_PRIMARY=codex FM_SUPERVISION_HOST_PARK_SECONDS=$BOUND FM_SUPERVISION_HOST_PARK_LIMIT=$LIMIT \
-    run_bounded $((LIMIT + 120)) TERM "$SCRIPT_DIR/fm-supervision-host.sh" park >"$OUT" 2>"$ERR"
+    run_bounded $((LIMIT + 120)) TERM 0 "$SCRIPT_DIR/fm-supervision-host.sh" park >"$OUT" 2>"$ERR"
   RC=$?
   set -e
   if grep -E '^(signal:|stale:|check:|heartbeat($|:)|supervision-host:)' "$OUT" 2>/dev/null \
@@ -162,7 +173,7 @@ fi
 
 set +e
 # Interrupt the checkpoint's active check group so the watcher's native EXIT cleanup can release its lock; ordinary watcher shutdown still uses TERM.
-run_bounded "$SECONDS_ARG" INT "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
+run_bounded "$SECONDS_ARG" INT 1 "$SCRIPT_DIR/fm-watch.sh" >"$OUT" 2>"$ERR"
 RC=$?
 set -e
 
