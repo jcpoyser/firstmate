@@ -77,6 +77,7 @@ trap 'rm -f "$OUT" "$ERR"' EXIT
 
 run_with_perl_timeout() {  # <seconds> <signal> <kill-after> <command...>
   perl -e '
+    use POSIX qw(:sys_wait_h);
     my $seconds = shift;
     my $signal = shift;
     my $kill_after = shift;
@@ -87,24 +88,26 @@ run_with_perl_timeout() {  # <seconds> <signal> <kill-after> <command...>
       exec @ARGV;
       die "exec failed: $!\n";
     }
+    my $timed_out = 0;
     local $SIG{ALRM} = sub {
-      kill $signal, -$pid;
-      if ($kill_after) {
-        my $grace = $ENV{FM_SIGNAL_GRACE} || 5;
-        local $SIG{ALRM} = sub {
-          kill "KILL", -$pid;
-          waitpid $pid, 0;
-          exit 124;
-        };
-        alarm $grace;
+      if ($timed_out) {
+        kill "KILL", -$pid;
+        waitpid $pid, 0;
+        exit 124;
       }
-      waitpid $pid, 0;
-      exit 124;
+      $timed_out = 1;
+      kill $signal, -$pid;
+      alarm($ENV{FM_SIGNAL_GRACE} || 5) if $kill_after;
     };
     alarm $seconds;
-    waitpid $pid, 0;
-    alarm 0;
-    exit($? >> 8);
+    while (1) {
+      my $waited = waitpid $pid, WNOHANG;
+      if ($waited == $pid) {
+        alarm 0;
+        exit($timed_out ? 124 : ($? >> 8));
+      }
+      select undef, undef, undef, 0.05;
+    }
   ' "$@"
 }
 
