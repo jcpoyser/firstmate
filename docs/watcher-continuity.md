@@ -247,6 +247,7 @@ An acknowledgement carries two separable facts:
 
 A generation mismatch therefore does not block consumption of rows through that sequence.
 It is a non-fatal result that names its own remedy: re-drain, then acknowledge the newer episode.
+
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, a watcher close during handling republishes the same generation as pending and forces one recovery turn even when no queue row remains, while the outstanding generation-bound acknowledgement stays valid.

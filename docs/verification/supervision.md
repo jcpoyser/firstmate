@@ -599,7 +599,6 @@ FM_TEST_SUMMARY total=1 failed=0 skipped_gate=0 duration_ms=11750
 On 2026-10-07 the announced-recovery fixture was revised so it reproduces the original failure.
 It appends a durable queue row, lets a first checkpoint announce that recovery generation while the row stays unacknowledged, then runs a second checkpoint and asserts it supervises for its full bound with the generation and row unchanged.
 The fixture was run on its own in an isolated copy of the test file, once with the checkpoint wrapper as committed and once with its `FM_WATCH_FOREGROUND_CHECKPOINT=1` export removed.
-The full file was not used for this record because its earlier quiet-checkpoint case failed on the verifying host before reaching the fixture.
 
 Observed output with the checkpoint distinction:
 
