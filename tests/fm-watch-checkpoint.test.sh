@@ -237,6 +237,7 @@ make_host_home() {  # <name>
   home=$(make_home "$1")
   mkdir -p "$home/root/bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$home/root/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
   fm_test_primary_checkout "$home/root" || fail "could not make the host fixture a primary checkout"
   cat > "$home/root/bin/fm-supervision-host.sh" <<'SH'
@@ -284,7 +285,7 @@ test_host_checkpoint_bounds_the_park_by_posture() {
   assert_contains "$(cat "$home/host-env")" 'park=1000' "the away bound must never shorten a longer checkpoint"
   # Quiet mode's record is a present captain (bin/fm-afk-contract.sh AWAY OR
   # QUIET), so the checkpoint keeps its attended bound beside it.
-  for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh fm-primary-scope-lib.sh; do cp "$ROOT/bin/$f" "$home/root/bin/$f"; done
+  for f in fm-afk-contract.sh fm-classify-lib.sh fm-timeout-lib.sh; do cp "$ROOT/bin/$f" "$home/root/bin/$f"; done
   rm -f "$home/state/.afk-contract"
   FM_HOME="$home" FM_AFK_MODE=quiet "$ROOT/bin/fm-afk-contract.sh" enter --words 'keep routine wakes off my main' >/dev/null 2>&1 \
     || fail "fixture: could not record quiet mode"
