@@ -117,6 +117,22 @@ for script in "${scripts[@]}"; do
   [ "$before" = "$(snapshot_tree "$WORKER_HOME")" ] || fail "$script changed the worker home before refusing"
 done
 
+# Compatibility probes are informational, not supervisor actions: Lavish
+# board hosting from a worker must still discover synchronous reply support.
+FAKEBIN="$TMP_ROOT/worker-tools"
+mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/lavish-axi" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'lavish-axi 0.1.80'
+SH
+chmod +x "$FAKEBIN/lavish-axi"
+for probe in lavish-compatible lavish-reply-compatible; do
+  fm_run_timed 5 env PATH="$FAKEBIN:$PATH" \
+    "$WORKER/bin/fm-bootstrap.sh" "$probe" \
+    > "$TMP_ROOT/$probe.out" 2> "$TMP_ROOT/$probe.err" \
+    || fail "worker $probe compatibility probe was incorrectly refused: $(cat "$TMP_ROOT/$probe.err")"
+done
+
 status=0
 fm_run_timed 5 env FM_TEST_SEAM=1 \
   FM_ROOT_OVERRIDE="$PRIMARY" FM_HOME="$WORKER_HOME" FM_STATE_OVERRIDE="$WORKER_HOME/state" \
