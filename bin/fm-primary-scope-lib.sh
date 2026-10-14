@@ -72,13 +72,11 @@ fm_root_is_provisioned_secondmate_home() {
 # Return 0 when $1 may run supervisor-only entrypoints: a plain primary
 # checkout, or a linked checkout that is a provisioned secondmate home.
 fm_primary_supervisor_checkout_matches() {
-  local root=$1 git_dir git_common_dir
+  local root=$1
   [ -f "$root/AGENTS.md" ] || return 1
   [ -d "$root/bin" ] || return 1
   fm_root_is_provisioned_secondmate_home "$root" && return 0
-  git_dir=$(git -C "$root" rev-parse --git-dir 2>/dev/null) || return 1
-  git_common_dir=$(git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
-  [ "$git_dir" = "$git_common_dir" ]
+  [ -d "$root/.git" ]
 }
 
 # Refuse supervisor-only entrypoints outside the primary checkout containing
