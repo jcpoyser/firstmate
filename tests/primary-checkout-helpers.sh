@@ -27,8 +27,11 @@ fm_test_primary_checkout() {  # <dir>
 
 # Print a plain primary copy of <source-checkout> staged under the existing,
 # caller-owned <base> directory.
-fm_test_primary_snapshot() {  # <source-checkout> <base>
+fm_test_primary_snapshot() (  # <source-checkout> <base>
   local src=$1 base=$2 snap head patch
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE
   snap="$base/firstmate"
   patch="$base/worktree.patch"
   head=$(git -C "$src" rev-parse HEAD) || return 1
@@ -41,4 +44,4 @@ fm_test_primary_snapshot() {  # <source-checkout> <base>
   (cd "$src" && git ls-files -z -o --exclude-standard | tar --null -T - -cf -) \
     | tar -xf - -C "$snap" || return 1
   printf '%s\n' "$snap"
-}
+)
