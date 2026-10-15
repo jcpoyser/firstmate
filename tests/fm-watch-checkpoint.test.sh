@@ -47,8 +47,10 @@ test_perl_timeout_fallback_honors_cleanup_bound_before_escalating() {
   fallback_bin="$home/fallback-bin"
   mkdir -p "$home/root/bin" "$fallback_bin"
   cp "$CHECKPOINT" "$home/root/bin/fm-watch-checkpoint.sh"
+  cp "$ROOT/bin/fm-primary-scope-lib.sh" "$home/root/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-engine-lib.sh" "$home/root/bin/fm-supervision-engine-lib.sh"
-  for tool in bash dirname mktemp rm perl grep cat; do
+  fm_test_primary_checkout "$home/root" || fail "could not make the Perl fallback fixture a primary checkout"
+  for tool in bash dirname mktemp rm perl grep cat git; do
     tool_path=$(command -v "$tool") || fail "could not locate $tool for the Perl fallback fixture"
     ln -s "$tool_path" "$fallback_bin/$tool"
   done
