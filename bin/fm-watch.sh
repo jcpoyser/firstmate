@@ -255,8 +255,8 @@ WATCHER_DOWNTIME_MARKER="$STATE/.watcher-down"
 # all live below the source guard at the very bottom of this file (see "Main
 # entry"). Sourcing this file for unit tests therefore loads the functions -
 # including the event-wait splice below - and returns before acquiring the lock
-# or starting the loop. Running it as a script executes the runtime exactly as
-# before, byte-for-byte.
+# or starting the loop. Running it as a script enforces the supervisor
+# checkout guard before entering the runtime.
 
 # Portable stat. macOS (BSD) stat uses `-f <fmt>`; Linux (GNU) stat uses `-c <fmt>`.
 # Do NOT use the `stat -f <fmt> ... || stat -c <fmt> ...` fallback form: on Linux

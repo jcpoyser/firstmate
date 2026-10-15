@@ -44,7 +44,9 @@
 # branch's turn ends, and a successor cycle that closed on a newer wake mid-turn
 # is that host's normal gap), while the repair line names the primary's own arm
 # command, which under a supervision host's primary pin is the host itself or
-# the plain arm. Always exits 0: the guard warns, it never blocks.
+# the plain arm. The warning path exits 0 and never blocks; the scope guard
+# refuses checkouts outside an authorized plain primary or provisioned secondmate
+# home with exit 1.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

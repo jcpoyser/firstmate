@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Shared marker-or-plain-checkout predicate for entrypoints scoped to a genuine
-# firstmate primary home. This file is sourced by hook and supervisor entrypoints
-# without side effects.
+# Shared checkout-scope predicates for firstmate hooks and supervisor-only
+# entrypoints. This file is sourced by hook and supervisor entrypoints without
+# side effects.
 #
 # Threat model: the supervisor guard stops an ordinary crew/scout worker that
 # has lost track of its role from running supervisor-only entrypoints out of
@@ -79,9 +79,9 @@ fm_primary_supervisor_checkout_matches() {
   [ -d "$root/.git" ]
 }
 
-# Refuse supervisor-only entrypoints outside the primary checkout containing
-# this sourced library. Caller-supplied root, home, and state overrides and
-# FM_TEST_SEAM never establish authority.
+# Refuse supervisor-only entrypoints unless the checkout containing this
+# library is an authorized primary or provisioned secondmate home. Caller-supplied
+# root, home, and state overrides and FM_TEST_SEAM never establish authority.
 fm_primary_supervisor_guard() {  # <entrypoint>
   local entrypoint=${1:-unknown} source_dir root
   source_dir=$(CDPATH='' cd -P "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd -P) || source_dir=
