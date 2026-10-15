@@ -72,20 +72,20 @@ START="$ROOT/bin/fm-afk-start.sh"
 CONTRACT="$ROOT/bin/fm-afk-contract.sh"
 
 unit_primary_snapshot_does_not_mutate_git_override_repository() {
-  local tmp caller head
+  local tmp caller head snapshot
   tmp=$(mktemp -d "${TMPDIR:-/tmp}/fm-primary-snapshot-isolation.XXXXXX") || {
     fail "primary snapshot isolation: could not create test directory"
     return
   }
   caller="$tmp/caller"
   mkdir -p "$tmp/base"
-  head=$(git -C "$ROOT" rev-parse HEAD) || {
+  head=$(fm_test_git -C "$ROOT" rev-parse HEAD) || {
     fail "primary snapshot isolation: could not read source HEAD"
     rm -rf "$tmp"
     return
   }
-  if ! git clone --quiet --shared "$ROOT" "$caller" \
-    || ! git -C "$caller" checkout --quiet -b "fm-test-snapshot-isolation-$$" "$head"; then
+  if ! fm_test_git clone --quiet --shared "$ROOT" "$caller" \
+    || ! fm_test_git -C "$caller" checkout --quiet -b "fm-test-snapshot-isolation-$$" "$head"; then
     fail "primary snapshot isolation: could not create caller repository"
     rm -rf "$tmp"
     return
@@ -93,33 +93,28 @@ unit_primary_snapshot_does_not_mutate_git_override_repository() {
   cp "$caller/.git/HEAD" "$tmp/head.before"
   cp "$caller/.git/index" "$tmp/index.before"
   cp "$caller/AGENTS.md" "$tmp/worktree.before"
-  git -C "$caller" status --porcelain=v1 > "$tmp/status.before"
+  fm_test_git -C "$caller" status --porcelain=v1 > "$tmp/status.before"
 
-  if (
-    export GIT_DIR="$caller/.git"
-    export GIT_WORK_TREE="$caller"
-    export GIT_INDEX_FILE="$caller/.git/index"
-    export GIT_COMMON_DIR="$caller/.git"
-    export GIT_OBJECT_DIRECTORY="$caller/.git/objects"
-    export GIT_ALTERNATE_OBJECT_DIRECTORIES="$caller/.git/objects"
-    fm_test_primary_snapshot "$ROOT" "$tmp/base" > "$tmp/snapshot.path" || exit 1
-    IFS= read -r snapshot < "$tmp/snapshot.path"
-    [ -d "$snapshot/.git" ] || exit 1
-    [ "$GIT_DIR" = "$caller/.git" ] || exit 1
-    [ "$GIT_WORK_TREE" = "$caller" ] || exit 1
-    [ "$GIT_INDEX_FILE" = "$caller/.git/index" ] || exit 1
-    [ "$GIT_COMMON_DIR" = "$caller/.git" ] || exit 1
-    [ "$GIT_OBJECT_DIRECTORY" = "$caller/.git/objects" ] || exit 1
-    [ "$GIT_ALTERNATE_OBJECT_DIRECTORIES" = "$caller/.git/objects" ] || exit 1
-    cmp -s "$tmp/head.before" "$caller/.git/HEAD" || exit 1
-    cmp -s "$tmp/index.before" "$caller/.git/index" || exit 1
-    cmp -s "$tmp/worktree.before" "$caller/AGENTS.md" || exit 1
-    git -C "$caller" status --porcelain=v1 > "$tmp/status.after" || exit 1
-    cmp -s "$tmp/status.before" "$tmp/status.after" || exit 1
-  ); then
-    pass "primary snapshot: Git overrides cannot redirect checkout operations into the caller repository"
+  if GIT_DIR="$caller/.git" \
+    GIT_WORK_TREE="$caller" \
+    GIT_INDEX_FILE="$caller/.git/index" \
+    GIT_COMMON_DIR="$caller/.git" \
+    GIT_OBJECT_DIRECTORY="$caller/.git/objects" \
+    GIT_ALTERNATE_OBJECT_DIRECTORIES="$caller/.git/objects" \
+    fm_test_primary_snapshot "$ROOT" "$tmp/base" > "$tmp/snapshot.path"; then
+    IFS= read -r snapshot < "$tmp/snapshot.path" || snapshot=
+    if [ -d "$snapshot/.git" ] \
+      && cmp -s "$tmp/head.before" "$caller/.git/HEAD" \
+      && cmp -s "$tmp/index.before" "$caller/.git/index" \
+      && cmp -s "$tmp/worktree.before" "$caller/AGENTS.md" \
+      && fm_test_git -C "$caller" status --porcelain=v1 > "$tmp/status.after" \
+      && cmp -s "$tmp/status.before" "$tmp/status.after"; then
+      pass "primary snapshot: Git overrides cannot redirect checkout operations into the caller repository"
+    else
+      fail "primary snapshot: Git overrides changed the caller repository"
+    fi
   else
-    fail "primary snapshot: Git overrides changed or blocked the caller repository"
+    fail "primary snapshot: Git overrides blocked the snapshot"
   fi
   rm -rf "$tmp"
 }

@@ -9,10 +9,17 @@
 # tests/lib.sh sources this file; standalone suites source it directly and own
 # the cleanup of the base directory they pass in. No side effects on source.
 
+fm_test_git() (
+  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
+    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+    GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE
+  git "$@"
+)
+
 fm_test_plain_checkout() {  # <dir>
   local git_dir git_common_dir
-  git_dir=$(git -C "$1" rev-parse --git-dir 2>/dev/null) || return 1
-  git_common_dir=$(git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
+  git_dir=$(fm_test_git -C "$1" rev-parse --git-dir 2>/dev/null) || return 1
+  git_common_dir=$(fm_test_git -C "$1" rev-parse --git-common-dir 2>/dev/null) || return 1
   [ "$git_dir" = "$git_common_dir" ]
 }
 
@@ -22,26 +29,23 @@ fm_test_primary_checkout() {  # <dir>
   local dir=$1
   [ -f "$dir/AGENTS.md" ] || cp "$ROOT/AGENTS.md" "$dir/AGENTS.md" || return 1
   fm_test_plain_checkout "$dir" && return 0
-  git init --quiet "$dir"
+  fm_test_git init --quiet "$dir"
 }
 
 # Print a plain primary copy of <source-checkout> staged under the existing,
 # caller-owned <base> directory.
-fm_test_primary_snapshot() (  # <source-checkout> <base>
+fm_test_primary_snapshot() {  # <source-checkout> <base>
   local src=$1 base=$2 snap head patch
-  unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR \
-    GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
-    GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM GIT_NAMESPACE
   snap="$base/firstmate"
   patch="$base/worktree.patch"
-  head=$(git -C "$src" rev-parse HEAD) || return 1
-  git clone --quiet --shared --no-checkout "$src" "$snap" || return 1
-  git -C "$snap" checkout --quiet --detach "$head" || return 1
-  git -C "$src" diff --binary HEAD > "$patch" || return 1
+  head=$(fm_test_git -C "$src" rev-parse HEAD) || return 1
+  fm_test_git clone --quiet --shared --no-checkout "$src" "$snap" || return 1
+  fm_test_git -C "$snap" checkout --quiet --detach "$head" || return 1
+  fm_test_git -C "$src" diff --binary HEAD > "$patch" || return 1
   if [ -s "$patch" ]; then
-    git -C "$snap" apply --whitespace=nowarn "$patch" || return 1
+    fm_test_git -C "$snap" apply --whitespace=nowarn "$patch" || return 1
   fi
-  (cd "$src" && git ls-files -z -o --exclude-standard | tar --null -T - -cf -) \
+  (cd "$src" && fm_test_git ls-files -z -o --exclude-standard | tar --null -T - -cf -) \
     | tar -xf - -C "$snap" || return 1
   printf '%s\n' "$snap"
-)
+}
