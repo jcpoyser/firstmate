@@ -1,0 +1,5 @@
+Scenario: worker runs supervisor-only wake-drain with FM_ROOT_OVERRIDE pointing to a plain primary checkout.
+Command: bin/fm-wake-drain.sh --help (FM_ROOT_OVERRIDE=<plain-primary>, FM_HOME=<disposable-worker-home>)
+Exit status: 1
+stderr: error: refusing supervisor-only bin/fm-wake-drain.sh from a crew/scout worktree or non-primary checkout; return to your own task 
+Worker state initialized: no

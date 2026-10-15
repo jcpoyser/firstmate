@@ -1,0 +1,4 @@
+Scenario: a genuine plain primary checkout invokes the same supervisor-only lock status entrypoint.
+Command: bin/fm-lock.sh status (from disposable plain clone; fleet path overrides unset)
+Exit status: 0
+lock: free 
